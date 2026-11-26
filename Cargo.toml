@@ -1,0 +1,47 @@
+[package]
+name = "forgecode"
+version = "0.1.0"
+edition = "2024"
+license-file = "LICENSE"
+description = "ForgeCode: IDE in Rust (GPUI) for C/C++, Rust, JS/TS and the web, with Copilot and AI agents"
+
+[dependencies]
+anyhow = "1.0.104"
+dirs = "7.0.0"
+gpui-kit = { version = "0.9.1", features = ["tree-sitter-languages"] }
+ignore = "0.4.34"
+lsp-types = { version = "0.97", features = ["proposed"] }
+portable-pty = "0.9.0"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+smol = "2.0.2"
+# The channel type of the editor's streamed suggestions (already in the tree).
+futures = "0.3"
+toml = "1.2.1"
+flate2 = "1"
+ureq = { version = "2", features = ["json"] }
+vt100 = "0.18.1"
+hayro = "0.9"
+image = { version = "0.25", default-features = false }
+similar = "2.7"
+notify = "8"
+
+[dev-dependencies]
+gpui-pre = { version = "=0.3.12", features = ["test-support"] }
+tree-sitter = "0.26"
+tree-sitter-sequel = "0.3"
+
+# GPUI is far too slow unoptimized: optimize dependencies even in dev builds (our crate stays fast to compile).
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+# Patched copy (vendor/gpui-component): one hover popover for docs + problem, with "Quick Fix…".
+[patch.crates-io]
+gpui-component = { path = "vendor/gpui-component" }
+# Patched copy (vendor/gpui-base): inline suggestions that grow while they are generated.
+gpui-base = { path = "vendor/gpui-base" }

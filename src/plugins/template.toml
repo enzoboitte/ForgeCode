@@ -1,0 +1,48 @@
+# ForgeCode module manifest.
+#
+# Every `run` is a shell command executed in the workspace directory with:
+#   ${file} ${dir} ${stem} ${workspace}   substituted in the command line
+#   PATH starts with the module directory; FORGE_PLUGIN_DIR points to it
+#   FORGE_FILE, FORGE_WORKSPACE, FORGE_LANGUAGE, FORGE_SELECTION   environment variables
+#   FORGE_ARGS (JSON) and FORGE_ARG_<name>                        for AI tools
+#
+# A command drives the IDE by printing lines like:
+#   @forge {"action":"notify","message":"Done"}
+#   @forge {"action":"open","path":"src/main.rs","line":10}
+#   @forge {"action":"replace_buffer","text":"..."}
+#   @forge {"action":"insert","text":"..."}
+#   @forge {"action":"chat","message":"Explain this file"}     (send a prompt to the AI chat)
+# Anything else goes to the Output panel.
+
+name = "{{name}}"
+version = "0.1.0"
+description = "Example module: commands, an AI tool, a language and themes."
+themes = "themes"
+
+[[commands]]
+title = "Hello from {{name}}"
+run = "hello.sh"   # the module directory is on PATH
+
+[[commands]]
+title = "Format with clang-format"
+run = "clang-format -i \"${file}\" && echo '@forge {\"action\":\"reload\"}'"
+languages = ["c", "cpp"]
+on_save = false
+
+[[tools]]
+name = "count_lines"
+description = "Count lines of code per file extension in the workspace."
+run = "git ls-files | sed 's/.*\\.//' | sort | uniq -c | sort -rn | head -20"
+
+[[tools]]
+name = "run_tests"
+description = "Run the project's tests. Optional `filter` selects tests by name."
+run = "cargo test $FORGE_ARG_filter 2>&1 | tail -50"
+[tools.parameters]
+filter = "Optional test name filter"
+
+[[languages]]
+extensions = ["zig"]
+highlight = "zig"
+server = ["zls"]
+run = "zig run \"${file}\""

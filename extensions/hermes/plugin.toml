@@ -1,0 +1,25 @@
+name = "Hermes Agent"
+version = "1.1.0"
+author = "Nous Research · intégration ForgeCode"
+icon = "bot"
+categories = ["IA", "Agents"]
+description = "L'agent de Nous Research dans le panneau IA : il lit, modifie et exécute dans le projet, garde la mémoire des conversations et compresse le contexte. Installé automatiquement ; utilise Copilot et vos IA locales autorisées dans Paramètres › IA › Agent."
+
+[agent]
+name = "Hermes"
+# Hermes runs from a source checkout (its build refuses wheels). ForgeCode unpacks the release and
+# installs it exactly as that release's scripts/install.sh does (uv venv, then the hash-verified
+# `uv sync --extra all --locked`; [all] includes ACP), without touching the shell or ~/.local/bin.
+source = "https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.9.24.tar.gz"
+# This release supports Python 3.11 to 3.13; its installer uses 3.11.
+python = "3.11"
+setup = [
+    ["{uv}", "venv", "venv", "--python", "{python}"],
+    ["{uv}", "sync", "--extra", "all", "--locked"],
+]
+command = ["venv/bin/hermes", "acp"]
+install_note = "Installation de Hermes (Python 3.11 et dépendances vérifiées par empreinte, quelques minutes la première fois)…"
+
+[agent.setup_env]
+UV_PROJECT_ENVIRONMENT = "{src}/venv"
+UV_PYTHON = "{src}/venv/bin/python"

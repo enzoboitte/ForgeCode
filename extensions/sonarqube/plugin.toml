@@ -1,0 +1,64 @@
+name = "SonarQube"
+version = "1.2.0"
+author = "ForgeCode"
+icon = "shield-check"
+categories = ["Qualité", "Sécurité"]
+description = "Analyse de qualité et de sécurité avec SonarQube : serveur distant ou serveur local Docker créé automatiquement."
+
+[[commands]]
+title = "SonarQube : analyser le projet"
+run = "sonar analyze"
+icon = "shield-check"
+placement = ["status_bar", "menu"]
+
+[[commands]]
+title = "SonarQube : problèmes du fichier courant"
+run = "sonar issues --file"
+icon = "list-checks"
+placement = ["editor", "menu"]
+
+[[commands]]
+title = "SonarQube : corriger le fichier courant avec l'IA"
+run = "sonar fix"
+icon = "sparkles"
+placement = ["editor", "menu"]
+
+[[commands]]
+title = "SonarQube : démarrer un serveur local (Docker)"
+run = "sonar local-start"
+
+[[commands]]
+title = "SonarQube : arrêter le serveur local"
+run = "sonar local-stop"
+
+[[commands]]
+title = "SonarQube : se connecter à un serveur…"
+run = "sonar configure"
+
+[[commands]]
+title = "SonarQube : ouvrir le tableau de bord"
+run = "sonar dashboard"
+
+[[commands]]
+title = "SonarQube : état"
+run = "sonar status"
+
+[[tools]]
+name = "sonarqube_issues"
+description = "Liste les problèmes SonarQube ouverts du projet (bugs, vulnérabilités, code smells) avec fichier, ligne, sévérité, règle et message. Lancer d'abord une analyse si le projet n'a jamais été analysé."
+run = "sonar issues"
+[tools.parameters]
+file = "Chemin relatif au projet pour ne garder qu'un fichier (optionnel)"
+severity = "Sévérité minimale : INFO, MINOR, MAJOR, CRITICAL ou BLOCKER (optionnel)"
+
+[[tools]]
+name = "sonarqube_rule"
+description = "Explique une règle SonarQube (ex. python:S1192) : description, pourquoi c'est un problème et comment corriger."
+run = "sonar rule"
+[tools.parameters]
+key = "Clé de la règle, par ex. javascript:S1481"
+
+[[tools]]
+name = "sonarqube_analyze"
+description = "Relance une analyse SonarQube du projet et renvoie le résumé (quality gate, mesures)."
+run = "sonar analyze"

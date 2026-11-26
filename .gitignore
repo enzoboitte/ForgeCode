@@ -1,0 +1,6 @@
+# Build output, including the vendored crates' own.
+target/
+/.forgecode
+.DS_Store
+__pycache__/
+# Cargo.lock is kept: release builds must use the exact versions tested here.

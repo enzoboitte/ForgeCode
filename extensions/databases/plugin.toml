@@ -1,0 +1,15 @@
+name = "Bases de données"
+version = "1.0.0"
+author = "ForgeCode"
+icon = "database"
+categories = ["Bases de données", "SQL"]
+description = "SQLite, PostgreSQL, MySQL, MariaDB, SQL Server et Oracle : arborescence des tables, données en grille modifiable, éditeur SQL, création et modification de tables, export CSV. Hermes peut interroger vos bases (écritures soumises à votre accord)."
+
+# A panel under Source Control in the activity bar.
+[database]
+engine = "db.py"
+
+# Drivers, installed by ForgeCode with uv in the module's runtime/ folder.
+[python]
+version = "3.12"
+packages = ["psycopg[binary]", "pymysql", "pymssql", "oracledb"]
