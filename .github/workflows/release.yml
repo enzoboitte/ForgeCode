@@ -16,8 +16,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, name: macos-arm64 }
-          - { os: macos-14, name: macos-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, name: macos-arm64 }
+          - { os: macos-latest, name: macos-intel, target: x86_64-apple-darwin }
           - { os: ubuntu-22.04, name: linux-x64 }
           - { os: windows-latest, name: windows-x64 }
     runs-on: ${{ matrix.os }}
