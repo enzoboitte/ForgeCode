@@ -1,6 +1,7 @@
 //! Git through the `git` CLI: status, staging, commits, branches, remotes, diffs, history, line changes.
 //! Blocking: call from background tasks.
 
+pub mod actions;
 pub mod graph;
 pub mod panel;
 

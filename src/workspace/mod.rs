@@ -294,6 +294,18 @@ impl Workspace {
         let subs = vec![
             cx.subscribe_in(&file_tree, window, Self::on_file_tree_event),
             cx.subscribe_in(&git, window, Self::on_git_event),
+            // A GitHub Actions run's log goes to the Output tab.
+            cx.subscribe_in(&git.read(cx).actions.clone(), window, |this, _, event: &crate::git::actions::ActionsEvent, window, cx| match event {
+                crate::git::actions::ActionsEvent::Log(title, text) => {
+                    this.output.update(cx, |o, cx| {
+                        o.push(format!("▶ GitHub Actions: {title}"), cx);
+                        for line in text.lines() {
+                            o.push(line.to_string(), cx);
+                        }
+                    });
+                    this.show_bottom_tab(BottomTab::Output, window, cx);
+                }
+            }),
             cx.subscribe_in(&search, window, |this, _, event: &search::SearchEvent, window, cx| match event {
                 search::SearchEvent::Open(path, line) => this.open_file(path.clone(), Some(*line), window, cx),
                 search::SearchEvent::Replaced(files) => {

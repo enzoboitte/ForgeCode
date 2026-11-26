@@ -41,6 +41,8 @@ pub struct GitPanel {
     busy: Option<&'static str>,
     error: Option<String>,
     files_scroll: UniformListScrollHandle,
+    /// The repository's GitHub Actions runs, under the changes (like VS Code's view).
+    pub actions: Entity<super::actions::ActionsView>,
     /// File lines built by renders so far (tests check only those on screen are).
     #[cfg(test)]
     built: std::cell::Cell<usize>,
@@ -68,13 +70,17 @@ fn one_line(text: &str) -> String {
 impl GitPanel {
     pub fn new(workspace: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).placeholder("Message"));
-        let mut this = Self { repo: None, workspace, status: Status::default(), branches: vec![], message, busy: None, error: None, files_scroll: UniformListScrollHandle::new(), #[cfg(test)] built: Default::default(), _task: None };
+        let actions = cx.new(|cx| super::actions::ActionsView::new(workspace.clone(), cx));
+        let mut this = Self { repo: None, workspace, status: Status::default(), branches: vec![], message, busy: None, error: None, files_scroll: UniformListScrollHandle::new(), actions, #[cfg(test)] built: Default::default(), _task: None };
         this.set_workspace(this.workspace.clone(), cx);
         this
     }
 
     pub fn set_workspace(&mut self, workspace: PathBuf, cx: &mut Context<Self>) {
         self.repo = Repo::discover(&workspace);
+        if workspace != self.workspace {
+            self.actions.update(cx, |a, cx| a.set_root(workspace.clone(), cx));
+        }
         self.workspace = workspace;
         self.refresh(cx);
     }
@@ -662,6 +668,7 @@ impl Render for GitPanel {
                 )
                 .vertical_scrollbar(&self.files_scroll),
             )
+            .child(self.actions.clone())
     }
 }
 
