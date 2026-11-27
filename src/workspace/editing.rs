@@ -129,31 +129,37 @@ pub fn toggle_comment(text: &str, selection: Range<usize>, style: CommentStyle) 
 }
 
 /// Swap the selected lines with the line above or below; `None` at the edge of the file.
+/// Line ends stay out of the edited range: the editor never puts a boundary inside a `\r\n`,
+/// so a range ending between the two would swallow the line break (and join two lines).
 pub fn move_lines(text: &str, selection: Range<usize>, up: bool) -> Option<Edit> {
-    let span = line_span(text, &selection);
+    let mut span = line_span(text, &selection);
+    if text[..span.end].ends_with('\r') {
+        span.end -= 1;
+    }
     let block = &text[span.clone()];
+    // Where the line before `at` (a line start) ends, without its `\r\n` / `\n`.
+    let line_end = |at: usize| if text[..at].ends_with("\r\n") { at - 2 } else { at - 1 };
     if up {
         if span.start == 0 {
             return None;
         }
-        let prev_start = text[..span.start - 1].rfind('\n').map_or(0, |i| i + 1);
-        let prev = &text[prev_start..span.start - 1];
-        let shift = prev.len() + 1;
+        let prev_end = line_end(span.start);
+        let prev_start = text[..prev_end].rfind('\n').map_or(0, |i| i + 1);
+        let (prev, eol) = (&text[prev_start..prev_end], &text[prev_end..span.start]);
+        let shift = span.start - prev_start;
         Some(Edit {
             range: prev_start..span.end,
-            text: format!("{block}\n{prev}"),
+            text: format!("{block}{eol}{prev}"),
             selection: selection.start - shift..selection.end - shift,
         })
     } else {
-        if span.end >= text.len() {
-            return None;
-        }
-        let next_end = text[span.end + 1..].find('\n').map_or(text.len(), |i| span.end + 1 + i);
-        let next = &text[span.end + 1..next_end];
-        let shift = next.len() + 1;
+        let next_start = span.end + text[span.end..].find('\n')? + 1;
+        let next_end = text[next_start..].find('\n').map_or(text.len(), |i| line_end(next_start + i + 1));
+        let (next, eol) = (&text[next_start..next_end], &text[span.end..next_start]);
+        let shift = next.len() + eol.len();
         Some(Edit {
             range: span.start..next_end,
-            text: format!("{next}\n{block}"),
+            text: format!("{next}{eol}{block}"),
             selection: selection.start + shift..selection.end + shift,
         })
     }
@@ -464,6 +470,14 @@ mod tests {
         assert_eq!(run(text, move_lines(text, 2..2, true).unwrap()).0, "b\na\nc");
         assert_eq!(run(text, move_lines(text, 2..2, false).unwrap()).0, "a\nc\nb");
         assert!(move_lines(text, 0..0, true).is_none() && move_lines(text, 4..4, false).is_none());
+        // Windows line ends: no boundary inside a `\r\n`, and no line lost or joined.
+        let crlf = "a\r\nb\r\nc\r\n";
+        for (sel, up, want) in [(3..3, true, "b\r\na\r\nc\r\n"), (3..3, false, "a\r\nc\r\nb\r\n"), (0..4, false, "c\r\na\r\nb\r\n"), (6..6, true, "a\r\nc\r\nb\r\n")] {
+            let edit = move_lines(crlf, sel, up).unwrap();
+            assert!(!crlf[..edit.range.end].ends_with('\r') && !crlf[..edit.range.start].ends_with('\r'));
+            assert_eq!(run(crlf, edit).0, want);
+        }
+        assert!(move_lines(crlf, 9..9, false).is_none());
         assert_eq!(run(text, copy_lines(text, 2..3, false)), ("a\nb\nb\nc".into(), "b".into()));
         assert_eq!(run(text, delete_lines(text, 2..2)).0, "a\nc");
         assert_eq!(run(text, delete_lines(text, 4..4)).0, "a\nb");
