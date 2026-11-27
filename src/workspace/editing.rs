@@ -291,6 +291,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new(secondary!("/"), ToggleLineComment, Some(EDITOR)),
         KeyBinding::new("alt-up", MoveLineUp, Some(EDITOR)),
         KeyBinding::new("alt-down", MoveLineDown, Some(EDITOR)),
+        KeyBinding::new("ctrl-shift-up", MoveLineUp, Some(EDITOR)),
+        KeyBinding::new("ctrl-shift-down", MoveLineDown, Some(EDITOR)),
         KeyBinding::new("shift-alt-up", CopyLineUp, Some(EDITOR)),
         KeyBinding::new("shift-alt-down", CopyLineDown, Some(EDITOR)),
         KeyBinding::new(secondary!("shift-k"), DeleteLine, Some(EDITOR)),
