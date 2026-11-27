@@ -221,7 +221,7 @@ impl DebugPanel {
     async fn launch(
         this: WeakEntity<Self>,
         adapter: Adapter,
-        launch: Value,
+        mut launch: Value,
         settings: LangSettings,
         cwd: PathBuf,
         breakpoints: Breakpoints,
@@ -230,17 +230,21 @@ impl DebugPanel {
         let (tx, rx) = smol::channel::unbounded();
         this.update(cx, |this, cx| { this.status = t("Installing the debugger if needed…").into(); cx.notify(); })?;
         let (dir, events) = (cwd.clone(), tx.clone());
-        let (client, port) = cx
+        let (client, port, gdb) = cx
             .background_spawn(async move {
                 let (argv, tcp) = adapters::command(adapter, &settings, &dir)?;
+                let gdb = dap::is_gdb(&argv);
                 if tcp {
                     let port = dap::free_port()?;
-                    anyhow::Ok((DapClient::start_tcp(&argv, &dir, port, events)?, Some(port)))
+                    anyhow::Ok((DapClient::start_tcp(&argv, &dir, port, events)?, Some(port), gdb))
                 } else {
-                    anyhow::Ok((DapClient::start(&argv, &dir, events)?, None))
+                    anyhow::Ok((DapClient::start(&argv, &dir, events)?, None, gdb))
                 }
             })
             .await?;
+        if gdb {
+            launch = dap::for_gdb(launch);
+        }
         this.update(cx, |this, cx| {
             this.client = Some(client.clone());
             this.session = vec![client.clone()];

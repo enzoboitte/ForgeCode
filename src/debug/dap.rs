@@ -160,16 +160,17 @@ fn handle_incoming(msg: Value, pending: &Pending, writer: Option<&Writer>, event
     }
 }
 
-/// The debug adapter command line: `lldb-dap` from Xcode (macOS) or PATH (`lldb-vscode` on older LLVM).
-pub fn adapter_command() -> Vec<String> {
+/// The debug adapter command line: `lldb-dap` from Xcode (macOS), the PATH (`lldb-vscode` on older
+/// LLVM) or LLVM's folders; else GDB 14+ and its built-in DAP (MinGW, Linux distributions).
+pub fn adapter_command() -> anyhow::Result<Vec<String>> {
     #[cfg(target_os = "macos")]
     if let Ok(out) = crate::util::command("xcrun").args(["-f", "lldb-dap"]).output() {
         if out.status.success() {
-            return vec![String::from_utf8_lossy(&out.stdout).trim().to_string()];
+            return Ok(vec![String::from_utf8_lossy(&out.stdout).trim().to_string()]);
         }
     }
     if let Some(found) = ["lldb-dap", "lldb-vscode"].into_iter().find_map(crate::lsp::install::which) {
-        return vec![found.display().to_string()];
+        return Ok(vec![found.display().to_string()]);
     }
     // Linux distributions version it (`lldb-dap-18`); Windows' LLVM installer leaves it off the PATH.
     let dirs: Vec<std::path::PathBuf> = if cfg!(windows) {
@@ -185,7 +186,42 @@ pub fn adapter_command() -> Vec<String> {
         .filter(|p| p.file_name().is_some_and(|n| { let n = n.to_string_lossy(); n == "lldb-dap.exe" || n == "lldb-dap" || n.starts_with("lldb-dap-") || n.starts_with("lldb-vscode-") }))
         .collect();
     versioned.sort_by_key(|p| std::cmp::Reverse(p.file_name().and_then(|n| n.to_str()).and_then(|n| n.rsplit('-').next()?.parse::<u32>().ok()).unwrap_or(0)));
-    vec![versioned.first().map(|p| p.display().to_string()).unwrap_or_else(|| "lldb-dap".into())]
+    if let Some(found) = versioned.first() {
+        return Ok(vec![found.display().to_string()]);
+    }
+    // GDB: on the PATH, or next to the compiler (MinGW ships it in the same `bin`).
+    let next_to_compiler = ["gcc", "g++"].iter().filter_map(|c| crate::lsp::install::which(c)?.parent().map(|d| d.join(format!("gdb{}", std::env::consts::EXE_SUFFIX))));
+    let gdb = crate::lsp::install::which("gdb").into_iter().chain(next_to_compiler).find(|p| p.is_file());
+    if let Some(gdb) = gdb {
+        let version = crate::util::command(&gdb).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        if gdb_version(&version).is_some_and(|v| v >= 14) {
+            return Ok(vec![gdb.display().to_string(), "--interpreter=dap".into()]);
+        }
+        anyhow::bail!("{} ({}): {}", crate::i18n::t("GDB is too old for debugging in ForgeCode, version 14 or later is needed"), gdb.display(), version.lines().next().unwrap_or(""));
+    }
+    anyhow::bail!("{}", crate::i18n::t("No C/C++ debugger found: install LLVM (lldb-dap) or GDB 14+ (shipped with MinGW / MSYS2)"))
+}
+
+/// `GNU gdb (GDB) 16.2` → 16.
+fn gdb_version(text: &str) -> Option<u32> {
+    text.lines().next()?.split_whitespace().find_map(|w| w.split('.').next()?.parse().ok().filter(|_| w.contains('.')))
+}
+
+/// Whether the adapter is GDB's own DAP (its launch arguments differ from lldb-dap's).
+pub fn is_gdb(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--interpreter=dap")
+}
+
+/// lldb-dap's launch arguments in GDB's words: `env` as an object, its own stop-at-main flag.
+pub fn for_gdb(mut launch: Value) -> Value {
+    if let Some(env) = launch["env"].as_array() {
+        let map: serde_json::Map<String, Value> = env.iter().filter_map(|e| e.as_str()?.split_once('=')).map(|(k, v)| (k.to_string(), v.into())).collect();
+        launch["env"] = map.into();
+    }
+    if launch["stopOnEntry"] == true {
+        launch["stopAtBeginningOfMainSubprogram"] = true.into();
+    }
+    launch
 }
 
 /// The last binary (non-test) executable reported by `cargo build --message-format=json`.
@@ -203,6 +239,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn speaks_gdb_s_launch_dialect() {
+        assert_eq!(gdb_version("GNU gdb (GDB) 16.2\nCopyright"), Some(16));
+        assert_eq!(gdb_version("GNU gdb (Ubuntu 12.1-0ubuntu1) 12.1"), Some(12));
+        let launch = for_gdb(serde_json::json!({"program": "a", "env": ["PATH=C:\\deps", "X=1=2"], "stopOnEntry": true}));
+        assert_eq!((launch["env"]["PATH"].as_str(), launch["env"]["X"].as_str(), launch["stopAtBeginningOfMainSubprogram"].as_bool()), (Some("C:\\deps"), Some("1=2"), Some(true)));
+        assert!(is_gdb(&["gdb".into(), "--interpreter=dap".into()]));
+    }
+
+    #[test]
     fn finds_cargo_executable() {
         let out = r#"{"reason":"compiler-artifact","profile":{"test":false},"executable":null}
 not json
@@ -214,8 +259,8 @@ not json
     /// End-to-end against the real adapter: stops at a breakpoint and reads locals.
     #[test]
     fn lldb_dap_stops_at_breakpoint() {
-        let adapter = adapter_command();
-        if crate::util::command(&adapter[0]).arg("--help").output().is_err() {
+        let Ok(adapter) = adapter_command() else { return eprintln!("no debugger installed, skipping") };
+        if is_gdb(&adapter) || crate::util::command(&adapter[0]).arg("--help").output().is_err() {
             return eprintln!("lldb-dap not installed, skipping");
         }
         let dir = std::env::temp_dir().join(format!("forge-dap-{}", std::process::id()));

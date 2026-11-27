@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::debug::adapters::{self, Plan};
-use crate::project::{BuildSystem, CMAKE_BUILD, Program, detect, executables};
+use crate::project::{CMAKE_BUILD, Program, executables};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
@@ -28,29 +28,29 @@ pub fn targets(root: &Path, file: Option<(&Path, &str)>, modules: &[ModuleLaunch
     for m in modules {
         all.extend(module_targets(root, m));
     }
-    all.extend(cmake_presets(root));
+    // Every build system of the project whose tool is installed (not only the first found).
     let build = |label: &str, detail: &str, cmd: &str, dir: PathBuf| Target { label: label.into(), detail: detail.into(), plan: Plan::native(Some(cmd.into()), Program::Newest(dir)) };
-    match detect(root) {
-        BuildSystem::CMake => all.push(build("CMake", "cmake -B build (Debug)", CMAKE_BUILD, root.join("build"))),
-        BuildSystem::Make => {
-            let make = make_program();
-            let targets = make_targets(root);
-            if targets.is_empty() {
-                all.push(build("Make", &make, &make, root.to_path_buf()));
-            }
-            for t in targets {
-                let cmd = format!("{make} {t}");
-                all.push(build(&format!("Make | {t}"), &cmd, &cmd, root.to_path_buf()));
-            }
+    if has("cmake") {
+        all.extend(cmake_presets(root));
+        if root.join("CMakeLists.txt").is_file() {
+            all.push(build("CMake", "cmake -B build (Debug)", CMAKE_BUILD, root.join("build")));
         }
-        BuildSystem::Cargo => all.push(Target { label: "Cargo".into(), detail: "cargo build".into(), plan: Plan::native(Some("cargo build --message-format=json-render-diagnostics".into()), Program::FromCargo) }),
-        _ => {}
+    }
+    if let Some(make) = make_program().filter(|_| ["Makefile", "makefile", "GNUmakefile"].iter().any(|m| root.join(m).is_file())) {
+        let targets = make_targets(root);
+        if targets.is_empty() {
+            all.push(build("Make", &make, &make, root.to_path_buf()));
+        }
+        for t in targets {
+            let cmd = format!("{make} {t}");
+            all.push(build(&format!("Make | {t}"), &cmd, &cmd, root.to_path_buf()));
+        }
+    }
+    if root.join("Cargo.toml").is_file() && has("cargo") {
+        all.push(Target { label: "Cargo".into(), detail: "cargo build".into(), plan: Plan::native(Some("cargo build --message-format=json-render-diagnostics".into()), Program::FromCargo) });
     }
     if let Some((file, lsp_id)) = file {
-        if let Some(plan) = adapters::plan(root, file, lsp_id) {
-            let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            all.push(Target { label: name, detail: crate::i18n::t("Current file").into(), plan });
-        }
+        all.extend(file_targets(root, file, lsp_id));
     }
     let mut unique: Vec<Target> = vec![];
     for t in all {
@@ -61,10 +61,56 @@ pub fn targets(root: &Path, file: Option<(&Path, &str)>, modules: &[ModuleLaunch
     expand_programs(unique)
 }
 
-/// `make`, or MinGW's `mingw32-make` when it is the only one.
-fn make_program() -> String {
-    let found = |p: &str| crate::lsp::install::which(p).is_some();
-    if !found("make") && found("mingw32-make") { "mingw32-make".into() } else { "make".into() }
+fn has(program: &str) -> bool {
+    crate::lsp::install::which(program).is_some()
+}
+
+/// `make`, else MinGW's `mingw32-make`; none when neither is installed.
+fn make_program() -> Option<String> {
+    ["make", "mingw32-make"].into_iter().find(|m| has(m)).map(String::from)
+}
+
+/// The current file on its own: C / C++ with each installed compiler (gcc, clang, MSVC's cl),
+/// other languages with their runtime when it is installed.
+fn file_targets(root: &Path, file: &Path, lsp_id: &str) -> Vec<Target> {
+    let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let here = crate::i18n::t("Current file");
+    let compilers: &[&str] = match lsp_id {
+        "c" => &["gcc", "clang", "cl"],
+        "cpp" => &["g++", "clang++", "cl"],
+        _ => {
+            let runtime: &[&str] = match lsp_id {
+                "python" => &["python3", "python", "py"],
+                "javascript" | "javascriptreact" | "typescript" | "typescriptreact" => &["node"],
+                "php" => &["php"],
+                "go" => &["go"],
+                "zig" => &["zig"],
+                "swift" => &["swiftc"],
+                "rust" => &["cargo"],
+                _ => &[],
+            };
+            let Some(tool) = runtime.iter().find(|r| has(r)) else { return vec![] };
+            return adapters::plan(root, file, lsp_id).map(|plan| Target { label: name, detail: format!("{here} | {tool}"), plan }).into_iter().collect();
+        }
+    };
+    let stem = file.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let tmp = std::env::temp_dir();
+    let includes = crate::language::include_flags(root);
+    compilers
+        .iter()
+        .filter(|c| has(c))
+        .map(|compiler| {
+            let exe = tmp.join(format!("forgecode-debug-{stem}-{compiler}{}", std::env::consts::EXE_SUFFIX)).display().to_string();
+            let std = if lsp_id == "cpp" { if *compiler == "cl" { "/std:c++20 /EHsc" } else { "-std=c++20" } } else { "" };
+            let cmd = if *compiler == "cl" {
+                // Objects and debug info next to the program, not in the project.
+                format!("cl /nologo /Zi /Od {std} {includes} \"{}\" /Fe\"{exe}\" /Fo\"{}\\\\\" /Fd\"{}\\\\\"", file.display(), tmp.display(), tmp.display())
+            } else {
+                format!("{compiler} -g -O0 {std} {includes} \"{}\" -o \"{exe}\"", file.display())
+            };
+            Target { label: format!("{name} | {compiler}"), detail: here.to_string(), plan: Plan::native(Some(cmd), Program::Path(exe)) }
+        })
+        .collect()
 }
 
 /// The Makefile's own targets (`build`, `debug`, `test`…), in file order; not patterns, special
@@ -243,19 +289,39 @@ fn module_targets(root: &Path, m: &ModuleLaunch) -> Vec<Target> {
         .into_iter()
         .flatten()
         .filter_map(|t| {
-            let program = match (t["program"].as_str(), t["program_dir"].as_str()) {
-                (Some(p), _) => Program::Path(absolute(root, p)),
-                (None, Some(d)) => Program::Newest(root.join(d)),
-                (None, None) => Program::Newest(root.join("build")),
+            let (dir, programs) = match (t["program"].as_str(), t["program_dir"].as_str()) {
+                (Some(p), _) => (None, vec![Program::Path(absolute(root, p))]),
+                (None, d) => {
+                    let dir = root.join(d.unwrap_or("build"));
+                    // Only the programs of this build (`build/…-debug/` for Debug), once built.
+                    let wanted = t["program_match"].as_str().unwrap_or("").to_lowercase();
+                    let mine: Vec<Program> = executables(&dir)
+                        .into_iter()
+                        .filter(|e| !wanted.is_empty() && e.strip_prefix(&dir).unwrap_or(e).to_string_lossy().to_lowercase().contains(&wanted))
+                        .map(|e| Program::Path(e.display().to_string()))
+                        .collect();
+                    (Some(dir.clone()), if mine.is_empty() { vec![Program::Newest(dir)] } else { mine })
+                }
             };
-            let plan = Plan {
-                args: t["args"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
-                cwd: t["cwd"].as_str().map(|c| PathBuf::from(absolute(root, c))),
-                env: env.clone(),
-                ..Plan::native(t["build"].as_str().map(String::from), program)
-            };
-            Some(Target { label: t["label"].as_str()?.to_string(), detail: t["detail"].as_str().map_or_else(|| m.name.clone(), |d| format!("{} | {d}", m.name)), plan })
+            let label = t["label"].as_str()?.to_string();
+            let detail = t["detail"].as_str().map_or_else(|| m.name.clone(), |d| format!("{} | {d}", m.name));
+            let several = programs.len() > 1;
+            let env = env.clone();
+            Some(programs.into_iter().map(move |program| {
+                let label = match (&program, &dir) {
+                    (Program::Path(p), Some(dir)) if several => format!("{label} > {}", Path::new(p).strip_prefix(dir).unwrap_or(Path::new(p)).display().to_string().replace('\\', "/")),
+                    _ => label.clone(),
+                };
+                let plan = Plan {
+                    args: t["args"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
+                    cwd: t["cwd"].as_str().map(|c| PathBuf::from(absolute(root, c))),
+                    env: env.clone(),
+                    ..Plan::native(t["build"].as_str().map(String::from), program)
+                };
+                Target { label, detail: detail.clone(), plan }
+            }).collect::<Vec<_>>())
         })
+        .flatten()
         .collect()
 }
 
@@ -327,6 +393,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The current C file: one entry per installed compiler, none for a missing one.
+    #[test]
+    fn current_file_with_each_installed_compiler() {
+        let root = project(&[("main.c", "int main(void) { return 0; }\n")]);
+        let labels: Vec<String> = file_targets(&root, &root.join("main.c"), "c").into_iter().map(|t| t.label).collect();
+        let installed: Vec<String> = ["gcc", "clang", "cl"].iter().filter(|c| has(c)).map(|c| format!("main.c | {c}")).collect();
+        assert_eq!(labels, installed);
+        assert!(file_targets(&root, &root.join("a.xyz"), "plaintext").is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn strips_comments_and_trailing_commas() {
         let v: Value = serde_json::from_str(&strip_jsonc("{\n // c\n \"a\": \"x // not a comment\", /* b */ \"l\": [1, 2,],\n}")).unwrap();
@@ -393,6 +470,17 @@ mod tests {
         assert_eq!((t[0].label.as_str(), t[0].detail.as_str()), ("Conan | Debug", "Conan"));
         assert_eq!(t[0].plan.program, Program::Newest(root.join("build/Debug")));
         assert!(t[0].plan.env.iter().any(|(k, _)| k == "FORGE_WORKSPACE"));
+        // `program_match`: only this build type's programs.
+        use std::os::unix::fs::PermissionsExt;
+        for exe in ["build/gcc-debug/app", "build/gcc-release/app"] {
+            std::fs::create_dir_all(root.join(exe).parent().unwrap()).unwrap();
+            std::fs::write(root.join(exe), "").unwrap();
+            std::fs::set_permissions(root.join(exe), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let run = r#"echo '[{"label": "Conan | Debug", "build": "b", "program_dir": "build", "program_match": "debug"}]'"#;
+        let t = module_targets(&root, &ModuleLaunch { name: "Conan".into(), dir: root.clone(), run: run.into() });
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].plan.program, Program::Path(root.join("build/gcc-debug/app").display().to_string()));
         let out = "building\n@forge {\"action\":\"notify\"}\n@forge {\"action\":\"launch\",\"env\":{\"PATH\":\"/deps\"}}\n";
         assert_eq!(launch_override(out).unwrap()["env"]["PATH"], "/deps");
         let _ = std::fs::remove_dir_all(root);

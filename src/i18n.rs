@@ -413,6 +413,8 @@ fn french(s: &str) -> Option<&'static str> {
         "Quit ForgeCode" => "Quitter ForgeCode",
         "Marketplace folder" => "Dossier du marketplace",
         "Current file" => "Fichier courant",
+        "GDB is too old for debugging in ForgeCode, version 14 or later is needed" => "GDB est trop ancien pour déboguer dans ForgeCode, il faut la version 14 ou plus",
+        "No C/C++ debugger found: install LLVM (lldb-dap) or GDB 14+ (shipped with MinGW / MSYS2)" => "Aucun débogueur C/C++ trouvé : installez LLVM (lldb-dap) ou GDB 14+ (fourni avec MinGW / MSYS2)",
         "Build stopped" => "Compilation arrêtée",
         "Open in the browser" => "Ouvrir dans le navigateur",
         "Access token" => "Jeton d'accès",

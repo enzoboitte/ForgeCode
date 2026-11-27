@@ -157,9 +157,15 @@ impl Element for SelectableText {
         let handle = self.handle.clone().unwrap_or_else(|| {
             window.with_element_state(
                 global_id.expect("SelectableText must have a stable element id"),
-                |retained: Option<TextSelectionHandle>, _| {
-                    let handle =
-                        retained.unwrap_or_else(|| TextSelectionHandle::new(self.text.clone(), cx));
+                |retained: Option<TextSelectionHandle>, window| {
+                    let handle = retained.unwrap_or_else(|| {
+                        let handle = TextSelectionHandle::new(self.text.clone(), cx);
+                        // Repaint while the selection is dragged, not only when the mouse is
+                        // released: views that don't re-render on their own (lists, panels)
+                        // otherwise keep showing the old selection.
+                        handle.refresh_window_on_change(window, cx).detach();
+                        handle
+                    });
                     (handle.clone(), handle)
                 },
             )

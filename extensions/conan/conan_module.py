@@ -225,6 +225,73 @@ def profiles():
     return sorted(set(names) | {"default"}, key=lambda n: (n != "default", n))
 
 
+def profile_settings(path, depth=0):
+    """`[settings]` of a profile file (its `include(...)` first); package-scoped ones left out."""
+    settings, section = {}, ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return settings
+    for line in lines:
+        s = line.split("#")[0].strip()
+        include = re.match(r"include\((.+)\)$", s)
+        if include and depth < 3:
+            name = include.group(1).strip().strip("'\"")
+            settings.update(profile_settings(name if os.path.isabs(name) else os.path.join(os.path.dirname(path), name), depth + 1))
+        elif s.startswith("["):
+            section = s
+        elif section == "[settings]" and "=" in s and ":" not in s.split("=")[0] and "{{" not in s:
+            key, value = (x.strip() for x in s.split("=", 1))
+            settings[key] = value
+    return settings
+
+
+def host():
+    """This machine as Conan names it: (os, arch)."""
+    import platform
+
+    system = {"Windows": "Windows", "Linux": "Linux", "Darwin": "Macos"}.get(platform.system(), platform.system())
+    machine = platform.machine().lower()
+    arch = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "armv8", "aarch64": "armv8"}.get(machine, machine)
+    return system, arch
+
+
+def visual_studios():
+    """Major versions of the installed Visual Studios (17 = 2022): vswhere, or the active environment."""
+    found = set()
+    if os.environ.get("VisualStudioVersion"):
+        found.add(int(float(os.environ["VisualStudioVersion"])))
+    vswhere = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Microsoft Visual Studio", "Installer", "vswhere.exe")
+    if os.path.exists(vswhere):
+        out = subprocess.run([vswhere, "-all", "-prerelease", "-products", "*", "-property", "installationVersion"], capture_output=True, text=True)
+        found |= {int(v.split(".")[0]) for v in out.stdout.split() if v.split(".")[0].isdigit()}
+    return found
+
+
+# compiler.version of msvc → Visual Studio major version.
+MSVC_VS = {"190": 14, "191": 15, "192": 16, "193": 17, "194": 17, "195": 18}
+
+
+def usable(settings, system, arch, studios):
+    """Whether a profile builds programs this machine runs: same OS, an architecture it runs, and
+    for MSVC the matching Visual Studio installed. Unknown settings don't exclude it."""
+    runs = {"x86_64": {"x86_64", "x86"}, "armv8": {"armv8", "x86_64"}}.get(arch, {arch})
+    if settings.get("os", system) != system or settings.get("arch", arch) not in runs:
+        return False
+    if settings.get("compiler") == "msvc":
+        needed = MSVC_VS.get(settings.get("compiler.version", ""))
+        return bool(studios) and (needed is None or needed in studios)
+    return True
+
+
+def available_profiles():
+    home = os.environ.get("CONAN_HOME") or os.path.join(os.path.expanduser("~"), ".conan2")
+    system, arch = host()
+    studios = visual_studios() if system == "Windows" else set()
+    return [p for p in profiles() if usable(profile_settings(os.path.join(home, "profiles", p)), system, arch, studios)]
+
+
 def settings_args(bt, profile):
     """Build type, profile (host and build, like `-pr:h=mingw -pr:b=mingw`) and compiler for Conan."""
     args = ["--build=missing", "-s", f"build_type={bt}"]
@@ -386,8 +453,10 @@ def json_launch():
             "detail": f"{how} (profil {profile})",
             "build": f"conan-forge build {bt.lower()} {profile}",
             "program_dir": "build",
+            # build/windows-gcc-16-debug/…: the program of this build type, not the other one.
+            "program_match": bt.lower(),
         }
-        for profile in profiles()
+        for profile in available_profiles()
         for bt in ("Debug", "Release")
     ])
 

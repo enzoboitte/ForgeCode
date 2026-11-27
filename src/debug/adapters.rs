@@ -71,7 +71,7 @@ pub fn plan(root: &Path, file: &Path, lsp_id: &str) -> Option<Plan> {
 /// Installs the adapter when missing. Blocking.
 pub fn command(adapter: Adapter, settings: &LangSettings, root: &Path) -> Result<(Vec<String>, bool)> {
     Ok(match adapter {
-        Adapter::Lldb => (super::dap::adapter_command(), false),
+        Adapter::Lldb => (super::dap::adapter_command()?, false),
         Adapter::Python => {
             let venv = tools_dir().join("debugpy");
             let python = venv_python(&venv);
