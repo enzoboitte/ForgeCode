@@ -36,3 +36,9 @@ target_link_libraries(app PRIVATE fmt::fmt)
 Avec un `conanfile.py`, « ajouter » indique la ligne `self.requires(...)` à écrire. Sans `[layout]` dans le `conanfile.txt`, les fichiers générés vont dans `build/conan` au lieu de la racine.
 
 Outils pour l'IA : `conan_search`, `conan_add`, `conan_install` : le chat peut chercher, ajouter et installer une bibliothèque lui-même.
+
+## Déboguer (F5)
+
+F5 propose « Conan | Debug » et « Conan | Release » : `conan install`, configuration CMake, compilation dans `build/<type>`, puis le débogueur sur le programme, avec l'environnement de `conanrun` (bibliothèques partagées des dépendances). Quand le dossier contient plusieurs programmes (l'application et ses tests), chacun a sa ligne.
+
+Le compilateur est celui réglé dans Paramètres > Langages > Compilateur C / C++ (`CC` / `CXX`, script d'environnement). Sous Windows, MSVC est trouvé même hors de son emplacement habituel ; Conan reçoit son dossier et CMake utilise Ninja (fourni avec Visual Studio).

@@ -75,18 +75,19 @@ fn is_placeholder(id: &str) -> bool {
 
 /// Children of `dir`; folders are only read when expanded (VS Code's lazy tree).
 fn scan(dir: &Path, expanded: &HashSet<SharedString>, new_in: Option<&Path>, dirs: &mut HashSet<PathBuf>) -> Vec<TreeItem> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir).map(|e| e.flatten().map(|e| e.path()).collect()).unwrap_or_default();
-    entries.retain(|p| p.file_name().is_some_and(|n| n != ".DS_Store"));
-    entries.sort_by_key(|p| (!p.is_dir(), p.file_name().map(|n| n.to_ascii_lowercase())));
+    // One stat per entry (follows symlinks like `is_dir`), not one per sort comparison.
+    let mut entries: Vec<(PathBuf, bool)> = std::fs::read_dir(dir).map(|e| e.flatten().map(|e| (e.path(), e.path().is_dir())).collect()).unwrap_or_default();
+    entries.retain(|(p, _)| p.file_name().is_some_and(|n| n != ".DS_Store"));
+    entries.sort_by_cached_key(|(p, is_dir)| (!is_dir, p.file_name().map(|n| n.to_ascii_lowercase())));
     let mut items = Vec::new();
     if new_in == Some(dir) {
         items.push(TreeItem::new(NEW_ROW, ""));
     }
-    for path in entries {
+    for (path, is_dir) in entries {
         let id: SharedString = path.display().to_string().into();
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let mut item = TreeItem::new(id.clone(), name);
-        if path.is_dir() {
+        if is_dir {
             dirs.insert(path.clone());
             let open = expanded.contains(&id);
             // A collapsed folder needs a (never shown) child to display as a folder; an open empty

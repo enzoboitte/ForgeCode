@@ -85,7 +85,7 @@ fn has_npm_start(root: &Path) -> bool {
 }
 
 /// Where the program to debug comes from once the build finished.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Program {
     Path(String),
     /// Read from `cargo build --message-format=json` output.
@@ -96,7 +96,12 @@ pub enum Program {
 
 /// Most recently modified executable file under `dir` (build outputs), skipping CMake internals.
 pub fn newest_executable(dir: &Path) -> Option<PathBuf> {
-    ignore::WalkBuilder::new(dir)
+    executables(dir).into_iter().next()
+}
+
+/// Executable files under `dir` (build outputs), the newest first, skipping CMake internals.
+pub fn executables(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<_> = ignore::WalkBuilder::new(dir)
         .max_depth(Some(3))
         .hidden(false)
         .git_ignore(false)
@@ -111,8 +116,9 @@ pub fn newest_executable(dir: &Path) -> Option<PathBuf> {
             let modified = meta.modified().ok()?;
             is_executable(&p, &meta).then_some((modified, p))
         })
-        .max_by_key(|(time, _)| *time)
-        .map(|(_, p)| p)
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().map(|(_, p)| p).collect()
 }
 
 #[cfg(unix)]

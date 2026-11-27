@@ -24,6 +24,8 @@ enum Filter {
 pub struct MarketplaceView {
     search: Entity<InputState>,
     filter: Filter,
+    /// Width of the card grid at the last paint: the settings page shares the window with panels.
+    width: std::rc::Rc<std::cell::Cell<f32>>,
     _subs: Vec<Subscription>,
 }
 
@@ -68,7 +70,7 @@ impl MarketplaceView {
             cx.observe_global::<Plugins>(|_, cx| cx.notify()),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
         ];
-        Self { search, filter: Filter::All, _subs: subs }
+        Self { search, filter: Filter::All, width: Default::default(), _subs: subs }
     }
 
     fn entries(&self, cx: &App) -> (Vec<Entry>, Vec<(std::path::PathBuf, String)>) {
@@ -193,9 +195,9 @@ impl MarketplaceView {
 }
 
 impl Render for MarketplaceView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Equal columns, about 300 px each in the settings page (the window less its sidebar).
-        let columns = ((f32::from(window.viewport_size().width) - 260.) / 300.).floor().clamp(1., 4.) as u16;
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Equal columns of at least CARD_MIN px, from the width the grid really has.
+        let columns = columns(self.width.get());
         let (entries, errors) = self.entries(cx);
         let query = self.search.read(cx).value().to_lowercase();
         let counts = (entries.len(), entries.iter().filter(|e| e.installed.is_some()).count(), entries.iter().filter(|e| e.update().is_some()).count());
@@ -254,9 +256,30 @@ impl Render for MarketplaceView {
                         .child(div().text_sm().child(if query.is_empty() { t("No extension in this folder.") } else { t("No extension matches this search.") })),
                 )
             })
-            .child(div().grid().grid_cols(columns).gap_3().children(cards))
+            .child(div().relative().grid().grid_cols(columns).gap_3().children(cards).child({
+                let width = self.width.clone();
+                canvas(
+                    move |bounds, window, _| {
+                        let w = f32::from(bounds.size.width);
+                        if (w - width.get()).abs() > 0.5 {
+                            width.set(w);
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+            }))
             .children(errors.into_iter().map(|(path, e)| div().text_xs().text_color(theme.danger).child(format!("{}: {e}", path.display()))))
     }
+}
+
+const CARD_MIN: f32 = 240.;
+
+/// Card columns for a grid `width` px wide (0 before the first paint: one column), with 12 px gaps.
+fn columns(width: f32) -> u16 {
+    ((width + 12.) / (CARD_MIN + 12.)).floor().clamp(1., 4.) as u16
 }
 
 #[cfg(test)]
@@ -283,10 +306,13 @@ mod tests {
         }
         let (_, cx) = cx.add_window_view(|window, cx| gpui_kit::base::Root::new(cx.new(|_| V), window, cx));
         // 3 columns for the 4 bundled extensions: the 4th is alone on its row.
-        cx.simulate_resize(gpui_kit::size(gpui_kit::px(1200.), gpui_kit::px(900.)));
+        cx.simulate_resize(gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(900.)));
         cx.run_until_parked();
+        // The first paint measures the grid, the second lays the cards out in columns.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let widths: Vec<_> = (0..4).map(|i| cx.debug_bounds(Box::leak(format!("mk-card-{i}").into_boxed_str())).expect("card").size.width).collect();
-        assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
+        assert!(widths.iter().all(|w| (f32::from(*w) - f32::from(widths[0])).abs() <= 1.), "{widths:?}");
+        assert_eq!((super::columns(0.), super::columns(400.), super::columns(520.), super::columns(2000.)), (1, 1, 2, 4));
     }
 }

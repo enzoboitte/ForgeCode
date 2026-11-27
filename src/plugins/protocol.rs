@@ -15,6 +15,8 @@ pub enum IdeAction {
     Reload,
     /// Send a prompt to the AI chat.
     Chat { message: String },
+    /// The program a build made and its environment: read by the debugger (F5), ignored elsewhere.
+    Launch,
 }
 
 /// `Some(Ok(action))` for a protocol line, `Some(Err)` for a malformed one, `None` for plain output.
@@ -30,6 +32,7 @@ mod tests {
     #[test]
     fn parses_actions_and_ignores_plain_lines() {
         assert_eq!(parse_line("hello"), None);
+        assert_eq!(parse_line(r#"@forge {"action":"launch","env":{"PATH":"/x"},"cwd":"/w"}"#), Some(Ok(IdeAction::Launch)));
         assert_eq!(
             parse_line(r#"@forge {"action":"open","path":"a.rs","line":3}"#),
             Some(Ok(IdeAction::Open { path: "a.rs".into(), line: Some(3) }))

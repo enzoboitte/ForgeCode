@@ -95,12 +95,9 @@ impl DebugPanel {
     }
 
     /// Build the program for `file` if it needs it, then launch it under its language's debugger.
-    pub fn start(&mut self, file: PathBuf, lsp_id: &str, workspace: PathBuf, breakpoints: Breakpoints, settings: LangSettings, cx: &mut Context<Self>) {
+    /// Build if needed, then debug the plan's program (a target chosen on F5).
+    pub fn start_plan(&mut self, plan: adapters::Plan, workspace: PathBuf, breakpoints: Breakpoints, settings: LangSettings, cx: &mut Context<Self>) {
         self.stop(cx);
-        let Some(plan) = adapters::plan(&workspace, &file, lsp_id) else {
-            self.status = format!("{} `{lsp_id}` (C, C++, Rust, Zig, Swift, Python, JavaScript, TypeScript, PHP, Go)", t("No debugger for")).into();
-            return cx.notify();
-        };
         self.console.clear();
         self.status = t("Preparing the debugger…").into();
         cx.notify();
@@ -112,26 +109,50 @@ impl DebugPanel {
                         this.status = t("Building…").into();
                         this.log(format!("$ {build_cmd}"), cx);
                     });
-                    match cx.background_spawn(async move { run_shell(&build_cmd, &ws, &[], 600) }).await {
+                    let env = plan.env.clone();
+                    // An hour: Conan may compile the dependencies from source the first time.
+                    match cx.background_spawn(async move { run_shell(&build_cmd, &ws, &env, 3600) }).await {
                         Ok(o) => o,
                         Err(e) => { let _ = this.update(cx, |this, cx| this.fail(e.to_string(), cx)); return; }
                     }
                 }
                 None => String::new(),
             };
-            let program = match plan.program {
+            // A module's build may name the program and its environment (`@forge {"action":"launch"…}`).
+            let module = crate::launch::launch_override(&output);
+            let program = match plan.program.clone() {
+                _ if module.as_ref().is_some_and(|m| m["program"].is_string()) => module.as_ref().and_then(|m| m["program"].as_str()).map(String::from),
                 Program::Path(p) => Some(p),
                 Program::FromCargo => dap::cargo_executable(&output),
                 Program::Newest(dir) => crate::project::newest_executable(&dir).map(|p| p.display().to_string()),
             };
-            let shown: String = output.lines().filter(|l| !l.starts_with('{')).collect::<Vec<_>>().join("\n");
+            let shown: String = output.lines().filter(|l| !l.starts_with('{') && !l.starts_with("@forge ")).collect::<Vec<_>>().join("\n");
             let failed = output.contains("[exit status");
             let _ = this.update(cx, |this, cx| this.log(shown, cx));
             let Some(program) = program.filter(|_| !failed) else {
                 let _ = this.update(cx, |this, cx| this.fail("Build failed or produced no executable".into(), cx));
                 return;
             };
-            let launch = adapters::launch_args(plan.adapter, &program, &workspace, &settings);
+            let mut launch = adapters::launch_args(plan.adapter, &program, &workspace, &settings);
+            if let Some(args) = &plan.args {
+                launch["args"] = json!(args);
+            }
+            if let Some(cwd) = &plan.cwd {
+                launch["cwd"] = cwd.display().to_string().into();
+            }
+            let mut env: Vec<String> = plan.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            if let Some(m) = &module {
+                env.extend(m["env"].as_object().into_iter().flatten().map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or(""))));
+                if let Some(cwd) = m["cwd"].as_str() {
+                    launch["cwd"] = cwd.into();
+                }
+                if let Some(args) = m["args"].as_array() {
+                    launch["args"] = json!(args);
+                }
+            }
+            if !env.is_empty() {
+                launch["env"] = json!(env);
+            }
             if let Err(e) = Self::launch(this.clone(), plan.adapter, launch, settings, workspace, breakpoints, cx).await {
                 let _ = this.update(cx, |this, cx| this.fail(e.to_string(), cx));
             }

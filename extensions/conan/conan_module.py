@@ -5,7 +5,10 @@ Installs Conan into the module's own folder when it is missing, creates a conanf
 CMake, adds packages from ConanCenter (latest version), installs them and configures CMake with
 Conan's toolchain and a compile_commands.json for clangd.
 
-Usage: conan_module.py new | add <name> | search <text> | install [Release|Debug] | configure [Release|Debug] | outdated
+Usage: conan_module.py new | add <name> | search <text> | install [Release|Debug] | configure [Release|Debug]
+       | build [Release|Debug] | outdated | launch-json
+
+The compiler is the one ForgeCode was set up with (CC / CXX, or MSVC's environment on Windows).
 """
 
 import json
@@ -63,16 +66,16 @@ def conan():
     return exe
 
 
-def run(args, capture=False):
+def run(args, capture=False, env=None):
     """`conan <args>` in the project; its output, when captured."""
     exe = conan()
     if not capture:
         print("$ conan " + " ".join(args), flush=True)
-        code = subprocess.call([exe] + args, cwd=WORKSPACE)
+        code = subprocess.call([exe] + args, cwd=WORKSPACE, env=env)
         if code != 0:
             raise Fail(f"conan {args[0]} a échoué (code {code})")
         return ""
-    out = subprocess.run([exe] + args, cwd=WORKSPACE, capture_output=True, text=True)
+    out = subprocess.run([exe] + args, cwd=WORKSPACE, capture_output=True, text=True, env=env)
     if out.returncode != 0:
         raise Fail((out.stderr or out.stdout).strip() or f"conan {args[0]} a échoué")
     return out.stdout
@@ -173,6 +176,41 @@ def cmd_search(text):
         print(f"{name}/{latest_by_name[name]}")
 
 
+def msvc_dir():
+    """Visual Studio whose environment is active (set up by ForgeCode, or a Developer Prompt)."""
+    return os.environ.get("VSINSTALLDIR") if WINDOWS else None
+
+
+def use_ninja(build_dir):
+    """Ninja (shipped with Visual Studio) under MSVC's environment: it works wherever Visual Studio is
+    installed, unlike the Visual Studio generator. Not for a folder configured with another one."""
+    if os.path.exists(os.path.join(WORKSPACE, build_dir, "CMakeCache.txt")):
+        return False
+    return bool(msvc_dir()) and shutil.which("ninja") is not None
+
+
+def detect_env():
+    """`conan profile detect` sees the compiler ForgeCode uses: CC / CXX, else MSVC's `cl`."""
+    env = dict(os.environ)
+    if msvc_dir() and not env.get("CC"):
+        env["CC"], env["CXX"] = "cl", "cl"
+    return env
+
+
+def compiler_conf(build_dir):
+    """Conan settings making CMake use that same compiler."""
+    conf = []
+    cc, cxx = os.environ.get("CC"), os.environ.get("CXX")
+    if cc or cxx:
+        compilers = {k: v for k, v in (("c", cc), ("cpp", cxx)) if v}
+        conf += ["-c", "tools.build:compiler_executables=" + json.dumps(compilers)]
+    if msvc_dir():
+        conf += ["-c", f"tools.microsoft.msbuild:installation_path={msvc_dir().rstrip(chr(92))}"]
+    if use_ninja(build_dir):
+        conf += ["-c", "tools.cmake.cmaketoolchain:generator=Ninja"]
+    return conf
+
+
 def build_type(arg):
     return "Debug" if (arg or "").lower() == "debug" else "Release"
 
@@ -181,9 +219,9 @@ def cmd_install(arg):
     path = conanfile()
     if not path:
         raise Fail("Pas de conanfile.txt ni de conanfile.py : lancez « Conan : créer un conanfile.txt ».")
-    run(["profile", "detect", "--exist-ok"], capture=True)
+    run(["profile", "detect", "--exist-ok"], capture=True, env=detect_env())
     bt = build_type(arg)
-    args = ["install", ".", "--build=missing", "-s", f"build_type={bt}"]
+    args = ["install", ".", "--build=missing", "-s", f"build_type={bt}"] + compiler_conf(os.path.join("build", bt))
     with open(path, encoding="utf-8") as f:
         text = f.read()
     # Without a layout Conan writes its files at the project's root: keep them in build/.
@@ -211,6 +249,8 @@ def cmd_configure(arg):
     out = os.path.join("build", bt)
     cmake = shutil.which("cmake") or "cmake"
     args = [cmake, "-S", ".", "-B", out, f"-DCMAKE_TOOLCHAIN_FILE={tc}", f"-DCMAKE_BUILD_TYPE={bt}", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
+    if use_ninja(out):
+        args += ["-G", "Ninja"]
     print("$ " + " ".join(args), flush=True)
     if subprocess.call(args, cwd=WORKSPACE) != 0:
         raise Fail("cmake a échoué")
@@ -221,6 +261,57 @@ def cmd_configure(arg):
         print("compile_commands.json copié à la racine (pour clangd).")
     print(f"Compiler ensuite : cmake --build {out}")
     forge("notify", message=f"CMake configuré avec Conan ({bt})")
+
+
+def run_env(bt):
+    """What Conan's `conanrun` script sets (the folders of the dependencies' shared libraries)."""
+    name = "conanrun.bat" if WINDOWS else "conanrun.sh"
+    found = []
+    for root, _, files in os.walk(os.path.join(WORKSPACE, "build")):
+        if name in files:
+            found.append(os.path.join(root, name))
+    mine = [f for f in found if os.sep + bt + os.sep in f] or found
+    if not mine:
+        return {}
+    script = max(mine, key=os.path.getmtime)
+    if WINDOWS:
+        out = subprocess.run(f'call "{script}" >nul && set', shell=True, capture_output=True, text=True)
+    else:
+        out = subprocess.run(["sh", "-c", f'. "{script}" >/dev/null && env'], capture_output=True, text=True)
+    env = {}
+    for line in out.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        # The shell's own bookkeeping is not the program's environment.
+        if sep and key and key not in ("SHLVL", "_", "PWD", "OLDPWD") and os.environ.get(key) != value:
+            env[key] = value
+    return env
+
+
+def cmd_build(arg):
+    """Install, configure and build for the debugger (F5), then tell ForgeCode the program's environment."""
+    bt = build_type(arg)
+    cmd_configure(bt)
+    out = os.path.join("build", bt)
+    args = [shutil.which("cmake") or "cmake", "--build", out, "--config", bt, "--parallel"]
+    print("$ " + " ".join(args), flush=True)
+    if subprocess.call(args, cwd=WORKSPACE) != 0:
+        raise Fail("la compilation a échoué")
+    forge("launch", env=run_env(bt), cwd=WORKSPACE)
+
+
+def json_launch():
+    """The ways to debug the project with Conan, for ForgeCode's F5 picker."""
+    if not conanfile():
+        return emit([])
+    emit([
+        {
+            "label": f"Conan | {bt}",
+            "detail": f"conan install + CMake + build ({os.path.join('build', bt)})",
+            "build": f"conan-forge build {bt.lower()}",
+            "program_dir": os.path.join("build", bt),
+        }
+        for bt in ("Debug", "Release")
+    ])
 
 
 def cmd_outdated():
@@ -353,6 +444,8 @@ def main(argv):
         "search": lambda: cmd_search(arg),
         "install": lambda: cmd_install(arg),
         "configure": lambda: cmd_configure(arg),
+        "build": lambda: cmd_build(arg),
+        "launch-json": lambda: json_launch(),
         "outdated": lambda: cmd_outdated(),
         # For ForgeCode's Conan panel.
         "requires-json": lambda: json_requires(),

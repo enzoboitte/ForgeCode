@@ -46,6 +46,12 @@ pub struct Settings {
     pub agent_delegation: bool,
     /// Folder the extension marketplace reads from; empty = `<config>/marketplace`.
     pub marketplace_dir: String,
+    /// Script setting up the compilers' environment (`vcvarsall.bat`, oneAPI `setvars.bat`, a `.sh`…)
+    /// or a Visual Studio / Build Tools folder. Empty: MSVC found automatically on Windows.
+    pub compiler_env: String,
+    /// C and C++ compilers (`CC` / `CXX`) for CMake, Conan, make…; empty = the build tools' choice.
+    pub cc: String,
+    pub cxx: String,
     /// What the AI panel runs: "classic" (the built-in chat) or "agent" (an agent module, Hermes).
     pub chat_engine: String,
     /// Models agent modules (Hermes) may use, as "<provider>/<model>"; served by the local gateway.
@@ -133,6 +139,9 @@ impl Default for Settings {
             review_model: String::new(),
             agent_delegation: true,
             marketplace_dir: String::new(),
+            compiler_env: String::new(),
+            cc: String::new(),
+            cxx: String::new(),
             chat_engine: "agent".into(),
             agent_models: vec![],
             agent_model: String::new(),

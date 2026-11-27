@@ -302,6 +302,8 @@ pub struct Workspace {
     next_pane: usize,
     show_bottom: bool,
     show_right: bool,
+    /// The target last debugged with F5, offered first next time.
+    last_launch: Option<String>,
     bottom_tab: BottomTab,
     output: Entity<OutputPanel>,
     terminals: Vec<Entity<Terminal>>,
@@ -569,6 +571,7 @@ impl Workspace {
             next_pane: 1,
             show_bottom: false,
             show_right: true,
+            last_launch: None,
             bottom_tab: BottomTab::Problems,
             output,
             terminals: vec![],
@@ -1405,11 +1408,16 @@ impl Workspace {
     fn sync_with_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let stale: Vec<PathBuf> = self
             .buffers()
-            .filter(|b| !b.dirty && std::fs::read_to_string(&b.path).is_ok_and(|disk| disk != b.text(cx)))
+            .filter(|b| !b.dirty && buffer::disk_stamp(&b.path) != b.disk && std::fs::read_to_string(&b.path).is_ok_and(|disk| disk != b.text(cx)))
             .map(|b| b.path.clone())
             .collect();
-        for b in self.buffers_mut().filter(|b| stale.contains(&b.path)) {
-            b.reload(window, cx);
+        for b in self.buffers_mut().filter(|b| !b.dirty) {
+            if stale.contains(&b.path) {
+                b.reload(window, cx);
+            } else {
+                // Touched but unchanged: not reread at the next sync.
+                b.disk = buffer::disk_stamp(&b.path);
+            }
         }
         self.refresh_review_marks(cx);
         self.file_tree.update(cx, |t, cx| t.refresh(cx));
@@ -1743,6 +1751,7 @@ impl Workspace {
                 self.show_right = true;
                 self.chat.update(cx, |c, cx| c.send(message, cx));
             }
+            IdeAction::Launch => {}
         }
         cx.notify();
     }
@@ -1768,18 +1777,57 @@ impl Workspace {
 
     // ---- debugger ----------------------------------------------------------------------
 
+    /// F5: continue a paused session, else pick how to start the project (launch.json, Conan,
+    /// CMake presets, the build system, the current file), like VS Code's picker.
     fn start_debug(&mut self, _: &StartDebug, window: &mut Window, cx: &mut Context<Self>) {
         if self.debug.read(cx).is_active() {
             return self.debug.update(cx, |d, cx| d.continue_(cx));
         }
-        let Some(b) = self.active_buffer() else {
+        let file = self.active_buffer().map(|b| (b.path.clone(), b.lang.lsp_id.clone()));
+        let modules: Vec<crate::launch::ModuleLaunch> = Plugins::global(cx)
+            .plugins
+            .iter()
+            .filter_map(|p| Some(crate::launch::ModuleLaunch { name: p.manifest.name.clone(), dir: p.dir.clone(), run: p.manifest.launch.clone()? }))
+            .collect();
+        let root = self.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let targets = cx.background_spawn(async move { crate::launch::targets(&root, file.as_ref().map(|(p, l)| (p.as_path(), l.as_str())), &modules) }).await;
+            let _ = this.update_in(cx, |w, window, cx| w.pick_launch(targets, window, cx));
+        })
+        .detach();
+    }
+
+    fn pick_launch(&mut self, mut targets: Vec<crate::launch::Target>, window: &mut Window, cx: &mut Context<Self>) {
+        if targets.is_empty() {
             return self.notify(t("Open the program's source file to debug it"), window, cx);
-        };
-        let (file, lsp_id) = (b.path.clone(), b.lang.lsp_id.clone());
-        self.save(&Save, window, cx);
-        let (root, bps) = (self.root.clone(), self.breakpoints.clone());
+        }
+        if let Some(ix) = self.last_launch.as_ref().and_then(|l| targets.iter().position(|t| &t.label == l)) {
+            let last = targets.remove(ix);
+            targets.insert(0, last);
+        }
+        if targets.len() == 1 {
+            return self.launch_target(targets.remove(0), window, cx);
+        }
+        let items = targets
+            .iter()
+            .map(|t| quick_open::PickerItem { label: t.label.clone(), detail: t.detail.clone(), keys: String::new(), icon: gpui_kit::assets::IconName::Bug, tint: None })
+            .collect();
+        let ws = cx.entity().downgrade();
+        quick_open::Picker::open(items, t("Select what to debug").into(), window, cx, move |ix, window, cx| {
+            let (ws, target) = (ws.clone(), targets[ix].clone());
+            window.defer(cx, move |window, cx| {
+                let _ = ws.update(cx, |w, cx| w.launch_target(target, window, cx));
+            });
+        });
+    }
+
+    fn launch_target(&mut self, target: crate::launch::Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_all(cx);
+        let lsp_id = if target.plan.adapter == crate::debug::adapters::Adapter::Lldb { "cpp".to_string() } else { self.active_buffer().map(|b| b.lang.lsp_id.clone()).unwrap_or_default() };
         let settings = Settings::get(cx).lang(&lsp_id);
-        self.debug.update(cx, |d, cx| d.start(file, &lsp_id, root, bps, settings, cx));
+        let (root, bps) = (self.root.clone(), self.breakpoints.clone());
+        self.last_launch = Some(target.label.clone());
+        self.debug.update(cx, |d, cx| d.start_plan(target.plan, root, bps, settings, cx));
         self.show_bottom_tab(BottomTab::Debug, window, cx);
     }
 

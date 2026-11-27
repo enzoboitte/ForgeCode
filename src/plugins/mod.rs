@@ -125,6 +125,9 @@ pub struct Manifest {
     /// Python packages the module needs, installed with uv into `runtime/venv`.
     #[serde(default)]
     pub python: Option<PythonSpec>,
+    /// Command printing the module's debug targets as JSON (see `launch::module_targets`).
+    #[serde(default)]
+    pub launch: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

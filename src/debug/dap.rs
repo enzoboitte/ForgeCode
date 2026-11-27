@@ -168,8 +168,24 @@ pub fn adapter_command() -> Vec<String> {
             return vec![String::from_utf8_lossy(&out.stdout).trim().to_string()];
         }
     }
-    let found = ["lldb-dap", "lldb-vscode"].into_iter().find(|n| crate::lsp::install::which(n).is_some());
-    vec![found.unwrap_or("lldb-dap").into()]
+    if let Some(found) = ["lldb-dap", "lldb-vscode"].into_iter().find_map(crate::lsp::install::which) {
+        return vec![found.display().to_string()];
+    }
+    // Linux distributions version it (`lldb-dap-18`); Windows' LLVM installer leaves it off the PATH.
+    let dirs: Vec<std::path::PathBuf> = if cfg!(windows) {
+        ["ProgramFiles", "ProgramW6432"].iter().filter_map(|v| std::env::var(v).ok()).map(|p| std::path::Path::new(&p).join("LLVM").join("bin")).collect()
+    } else {
+        // Debian / Ubuntu: /usr/lib/llvm-18/bin.
+        let llvm = std::fs::read_dir("/usr/lib").into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("llvm-"))).map(|p| p.join("bin"));
+        std::env::split_paths(&crate::lsp::install::search_path()).chain(llvm).collect()
+    };
+    let mut versioned: Vec<std::path::PathBuf> = dirs
+        .iter()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path()))
+        .filter(|p| p.file_name().is_some_and(|n| { let n = n.to_string_lossy(); n == "lldb-dap.exe" || n == "lldb-dap" || n.starts_with("lldb-dap-") || n.starts_with("lldb-vscode-") }))
+        .collect();
+    versioned.sort_by_key(|p| std::cmp::Reverse(p.file_name().and_then(|n| n.to_str()).and_then(|n| n.rsplit('-').next()?.parse::<u32>().ok()).unwrap_or(0)));
+    vec![versioned.first().map(|p| p.display().to_string()).unwrap_or_else(|| "lldb-dap".into())]
 }
 
 /// The last binary (non-test) executable reported by `cargo build --message-format=json`.

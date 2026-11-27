@@ -37,6 +37,8 @@ pub struct Buffer {
     /// The file's own indentation, detected when it was opened.
     pub indent: TabSize,
     pub dirty: bool,
+    /// The file on disk when last read or written: a sync only rereads files whose stamp moved.
+    pub disk: Option<(std::time::SystemTime, u64)>,
     pub lsp: Option<Arc<LspClient>>,
     // Later collections paint over earlier ones: git < diagnostics < breakpoints.
     git_marks: GutterDecorationCollection,
@@ -86,6 +88,12 @@ pub fn detect_indent(text: &str) -> Option<TabSize> {
     (*count > 0).then_some(TabSize { tab_size: best, hard_tabs: false })
 }
 
+/// Modification time and size of `path`, to notice changes without reading the file.
+// shortcut: a rewrite with the same size inside the filesystem's time granularity goes unseen; hash the file if that bites.
+pub fn disk_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    std::fs::metadata(path).ok().and_then(|m| Some((m.modified().ok()?, m.len())))
+}
+
 impl Buffer {
     pub fn new(path: PathBuf, text: String, lang: LanguageInfo, window: &mut Window, cx: &mut App) -> Self {
         let s = Settings::get(cx).clone();
@@ -114,7 +122,8 @@ impl Buffer {
         });
         let (review_marks, review_gutter) = editor.update(cx, |e, cx| (e.create_range_decorations_collection(vec![], cx), e.create_gutter_decorations_collection(vec![], cx)));
         let intel = CodeIntel::new(path.clone(), lang.lsp_id.clone(), None);
-        let mut this = Self { path, preview: Preview::Off, intel, editor, lang, indent, dirty: false, lsp: None, git_marks, diagnostic_marks, breakpoint_marks, ruler, debug_line, conflict_marks, conflicts: vec![], problems: Default::default(), ai_fix: None, fix_marks, review_marks, review_gutter };
+        let disk = disk_stamp(&path);
+        let mut this = Self { path, preview: Preview::Off, intel, editor, lang, indent, dirty: false, disk, lsp: None, git_marks, diagnostic_marks, breakpoint_marks, ruler, debug_line, conflict_marks, conflicts: vec![], problems: Default::default(), ai_fix: None, fix_marks, review_marks, review_gutter };
         this.install_providers(cx);
         this.refresh_conflicts(cx);
         this
@@ -335,6 +344,7 @@ impl Buffer {
                 lsp.sync(&self.path, &text);
             }
             self.dirty = false;
+            self.disk = disk_stamp(&self.path);
         }
     }
 
@@ -371,6 +381,7 @@ impl Buffer {
         }
         std::fs::rename(&tmp, &self.path)?;
         self.dirty = false;
+        self.disk = disk_stamp(&self.path);
         if let Some(lsp) = &self.lsp {
             lsp.did_save(&self.path);
         }

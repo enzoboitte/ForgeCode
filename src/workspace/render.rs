@@ -142,8 +142,9 @@ impl Workspace {
                         .child(format!("ForgeCode - {name}"))
                         .when_some(branch, |el, b| el.child(h_flex().gap_1().child(IconName::GitBranch).child(b))),
                 )
-                // Module commands placed in the title bar, with their own icons.
-                .children(module_buttons)
+                // Module commands placed in the title bar, with their own icons. `occlude`: on Windows
+                // the bar is a drag area that would take the clicks (the app menu bar does the same).
+                .child(h_flex().occlude().gap_0p5().children(module_buttons)
                 .child(icon_button("theme", if theme.is_dark() { IconName::Sun } else { IconName::Moon }, "Toggle theme")
                     .on_click(|_, w, cx| w.dispatch_action(Box::new(ToggleTheme), cx)))
                 .child(div().mx_1().w(px(1.)).h(px(16.)).bg(theme.border))
@@ -152,7 +153,7 @@ impl Workspace {
                 .child(icon_button("toggle-bottom", IconName::PanelBottom, "Toggle panel").selected(self.show_bottom)
                     .on_click(cx.listener(|t, _, _, cx| { t.show_bottom = !t.show_bottom; cx.notify(); })))
                 .child(icon_button("toggle-chat", IconName::PanelRight, "Toggle chat").selected(self.show_right)
-                    .on_click(cx.listener(|t, _, _, cx| { t.show_right = !t.show_right; cx.notify(); }))),
+                    .on_click(cx.listener(|t, _, _, cx| { t.show_right = !t.show_right; cx.notify(); })))),
         )
     }
 

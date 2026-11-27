@@ -1,9 +1,12 @@
 name = "Conan"
-version = "1.0.0"
+version = "1.1.0"
 author = "ForgeCode"
 icon = "package"
 categories = ["C/C++", "Dépendances"]
 description = "Gestionnaire de paquets C/C++ Conan 2 : ajoute des paquets de ConanCenter, les installe et configure CMake (clangd trouve leurs en-têtes). Installe Conan lui-même s'il manque."
+
+# The F5 picker offers "Conan | Debug" and "Conan | Release": install, CMake, build, then debug.
+launch = "conan-forge launch-json"
 
 [activation]
 workspace_contains = ["conanfile.txt", "conanfile.py", "CMakeLists.txt"]

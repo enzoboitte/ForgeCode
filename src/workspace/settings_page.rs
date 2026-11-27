@@ -224,6 +224,12 @@ pub fn settings_view(cx: &App) -> SettingsView {
         lang_group("typescript", "TypeScript", true, Some("Node executable"), false),
         lang_group("c", "C", false, None, false),
         lang_group("cpp", "C++", false, None, false),
+        SettingGroup::new().title(t("C / C++ compiler")).description(t("Used by CMake, Conan, make, the terminal and clangd. Applied at the next start; delete the build folder after a change.")).items([
+            SettingItem::new(t("Environment script"), text_field!(compiler_env))
+                .description(t("vcvarsall.bat, a Visual Studio / Build Tools folder, setvars.bat, any .bat or .sh. Empty: MSVC found automatically on Windows.")),
+            SettingItem::new(t("C compiler (CC)"), text_field!(cc)),
+            SettingItem::new(t("C++ compiler (CXX)"), text_field!(cxx)),
+        ]),
         lang_group("rust", "Rust", false, None, false),
         lang_group("go", "Go", false, None, false),
     ]);

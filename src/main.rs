@@ -12,12 +12,14 @@ mod git;
 mod i18n;
 mod icons;
 mod language;
+mod launch;
 mod lsp;
 mod plugins;
 mod project;
 mod recent;
 mod rpc;
 mod settings;
+mod toolchain;
 mod util;
 mod workspace;
 
@@ -88,6 +90,9 @@ fn main() {
         true => (arg.parent().map(PathBuf::from).unwrap_or_default(), Some(arg)),
         false => (arg, None),
     };
+
+    // Builds, Conan, CMake, the terminal and clangd use the chosen compiler (MSVC found anywhere).
+    toolchain::adopt(&Settings::load());
 
     gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
         gpui_kit::init(cx);

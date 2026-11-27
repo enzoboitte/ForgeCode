@@ -809,6 +809,11 @@ pub fn special_key(key: &str, shift: bool, alt: bool, ctrl: bool) -> Option<Vec<
 }
 
 /// Bytes a key press sends to the PTY.
+/// Whether Ctrl+Alt+`key` typed `c` through AltGr: a printable character other than the key's own letter.
+fn altgr_typed(key: &str, c: &str) -> bool {
+    !c.is_empty() && !c.chars().any(char::is_control) && (!c.eq_ignore_ascii_case(key) || !key.chars().all(|k| k.is_ascii_alphabetic()))
+}
+
 pub fn key_bytes(key: &str, key_char: Option<&str>, ctrl: bool, alt: bool, app_cursor: bool) -> Option<Vec<u8>> {
     let arrow = |c: char| Some(if app_cursor { format!("\x1bO{c}") } else { format!("\x1b[{c}") }.into_bytes());
     let bytes = match key {
@@ -825,6 +830,10 @@ pub fn key_bytes(key: &str, key_char: Option<&str>, ctrl: bool, alt: bool, app_c
         "delete" => Some(b"\x1b[3~".to_vec()),
         "pageup" => Some(b"\x1b[5~".to_vec()),
         "pagedown" => Some(b"\x1b[6~".to_vec()),
+        // AltGr (Ctrl+Alt on Windows): the character it types (`\`, `@`, `€`…), not a control code.
+        k if ctrl && alt && key_char.is_some_and(|c| altgr_typed(k, c)) => {
+            return key_char.map(|s| s.as_bytes().to_vec());
+        }
         k if ctrl && k.len() == 1 => {
             let c = k.as_bytes()[0].to_ascii_lowercase();
             c.is_ascii_lowercase().then(|| vec![c - b'a' + 1])
@@ -1069,6 +1078,11 @@ mod tests {
         assert_eq!(key_bytes("a", Some("a"), false, false, false), Some(b"a".to_vec()));
         assert_eq!(key_bytes("b", Some("b"), false, true, false), Some(b"\x1bb".to_vec()));
         assert_eq!(key_bytes("shift", None, false, false, false), None);
+        // AltGr on Windows arrives as Ctrl+Alt: AZERTY AltGr+8 types `\`, AltGr+E `€`.
+        assert_eq!(key_bytes("8", Some("\\"), true, true, false), Some(b"\\".to_vec()));
+        assert_eq!(key_bytes("\\", Some("\\"), true, true, false), Some(b"\\".to_vec()));
+        assert_eq!(key_bytes("e", Some("€"), true, true, false), Some("€".as_bytes().to_vec()));
+        assert_eq!(key_bytes("a", Some("a"), true, true, false), Some(vec![1]), "Ctrl+Alt+A stays a control key");
         assert_eq!(super::edit_shortcut("left", false, true), Some(&b"\x1bb"[..]));
         assert_eq!(super::edit_shortcut("right", true, false), Some(&b"\x05"[..]));
         assert_eq!(super::edit_shortcut("backspace", true, false), Some(&b"\x15"[..]));

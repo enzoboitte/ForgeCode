@@ -27,19 +27,30 @@ pub enum Adapter {
     Go,
 }
 
-/// How to debug a file: optional build step, the program, and the adapter.
-#[derive(Debug, PartialEq)]
+/// How to debug: optional build step, the program, and the adapter. `args` and `cwd` replace the
+/// language settings' when given; `env` is set for the build and the program.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     pub build: Option<String>,
     pub program: Program,
     pub adapter: Adapter,
+    pub args: Option<Vec<String>>,
+    pub cwd: Option<PathBuf>,
+    pub env: Vec<(String, String)>,
+}
+
+impl Plan {
+    /// A native program (lldb-dap) built by `build`.
+    pub fn native(build: Option<String>, program: Program) -> Self {
+        Plan { build, program, adapter: Adapter::Lldb, args: None, cwd: None, env: vec![] }
+    }
 }
 
 pub fn plan(root: &Path, file: &Path, lsp_id: &str) -> Option<Plan> {
-    let script = |adapter| Some(Plan { build: None, program: Program::Path(file.display().to_string()), adapter });
+    let script = |adapter| Some(Plan { adapter, ..Plan::native(None, Program::Path(file.display().to_string())) });
     let stem = file.file_stem()?.to_string_lossy().to_string();
     let exe = std::env::temp_dir().join(format!("forgecode-debug-{stem}{}", std::env::consts::EXE_SUFFIX)).display().to_string();
-    let native = |build: String, program| Some(Plan { build: Some(build), program, adapter: Adapter::Lldb });
+    let native = |build: String, program| Some(Plan::native(Some(build), program));
     match (lsp_id, detect(root)) {
         ("rust", _) => native("cargo build --message-format=json-render-diagnostics".into(), Program::FromCargo),
         ("c" | "cpp", BuildSystem::CMake) => native(crate::project::CMAKE_BUILD.into(), Program::Newest(root.join("build"))),
