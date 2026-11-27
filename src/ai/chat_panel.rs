@@ -383,6 +383,15 @@ fn summarize(args: &str) -> String {
         .unwrap_or_default()
 }
 
+/// History kept for the model, in characters. The setting is sized for local models; cloud
+/// models take far more, and cutting them to it made them forget the conversation.
+fn context_budget(catalog: &[ModelInfo], model: &str, setting: usize) -> usize {
+    // shortcut: about 100k tokens for every cloud model; read each model's real window when the APIs expose it.
+    const CLOUD: usize = 400_000;
+    let local = catalog.iter().find(|m| m.model_ref == model).is_none_or(|m| m.local);
+    if local { setting } else { setting.max(CLOUD) }
+}
+
 fn last_lines(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.trim_end().lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
@@ -923,7 +932,8 @@ impl ChatPanel {
         let history = self.history.clone();
         let (tx, rx) = smol::channel::unbounded();
         *self.live_mode.lock().unwrap() = mode;
-        let rt = Runtime::new(tx, cancel, self.live_mode.clone(), resolver, catalog, model, settings.review_model.clone(), settings.agent_delegation, settings.ai_context_chars);
+        let (catalog_for_budget, model_for_budget) = (catalog.clone(), model.clone());
+        let rt = Runtime::new(tx, cancel, self.live_mode.clone(), resolver, catalog, model, settings.review_model.clone(), settings.agent_delegation, context_budget(&catalog_for_budget, &model_for_budget, settings.ai_context_chars));
         self.control = Some(rt.control.clone());
         std::thread::spawn(move || agent::run(Arc::new(rt), toolbox, history));
         self._task = Some(cx.spawn(async move |this, cx| {
@@ -1701,7 +1711,15 @@ mod tests {
     use super::{ChatContext, user_content};
 
     #[test]
-    fn commands_and_mentions() {
+    fn cloud_models_keep_the_conversation() {
+        let catalog = [super::super::models::describe("copilot/claude-opus-5.5", false), super::super::models::describe("lm/qwen3-35b", true)];
+        assert_eq!(super::context_budget(&catalog, "copilot/claude-opus-5.5", 24_000), 400_000);
+        assert_eq!(super::context_budget(&catalog, "lm/qwen3-35b", 24_000), 24_000);
+        assert_eq!(super::context_budget(&catalog, "unknown/x", 24_000), 24_000);
+    }
+
+    #[test]
+        fn commands_and_mentions() {
         use super::{expand_command, trigger_word};
         let cmds = vec![
             ("fix".to_string(), String::new(), "Fix it. {}".to_string()),
