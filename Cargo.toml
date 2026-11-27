@@ -20,7 +20,7 @@ smol = "2.0.2"
 futures = "0.3"
 toml = "1.2.1"
 flate2 = "1"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", features = ["json", "native-certs"] }
 vt100 = "0.18.1"
 hayro = "0.9"
 image = { version = "0.25", default-features = false }

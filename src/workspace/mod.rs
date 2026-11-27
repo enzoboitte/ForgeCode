@@ -382,11 +382,11 @@ impl Workspace {
             }),
             cx.subscribe_in(&file_tree, window, Self::on_file_tree_event),
             cx.subscribe_in(&git, window, Self::on_git_event),
-            // A GitHub Actions run's log goes to the Output tab.
+            // A CI run's log (GitHub, GitLab, Gitea) goes to the Output tab.
             cx.subscribe_in(&git.read(cx).actions.clone(), window, |this, _, event: &crate::git::actions::ActionsEvent, window, cx| match event {
                 crate::git::actions::ActionsEvent::Log(title, text) => {
                     this.output.update(cx, |o, cx| {
-                        o.push(format!("▶ GitHub Actions: {title}"), cx);
+                        o.push(format!("▶ CI: {title}"), cx);
                         for line in text.lines() {
                             o.push(line.to_string(), cx);
                         }

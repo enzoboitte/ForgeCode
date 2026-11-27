@@ -70,7 +70,7 @@ fn one_line(text: &str) -> String {
 impl GitPanel {
     pub fn new(workspace: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).placeholder("Message"));
-        let actions = cx.new(|cx| super::actions::ActionsView::new(workspace.clone(), cx));
+        let actions = cx.new(|cx| super::actions::ActionsView::new(workspace.clone(), window, cx));
         let mut this = Self { repo: None, workspace, status: Status::default(), branches: vec![], message, busy: None, error: None, files_scroll: UniformListScrollHandle::new(), actions, #[cfg(test)] built: Default::default(), _task: None };
         this.set_workspace(this.workspace.clone(), cx);
         this

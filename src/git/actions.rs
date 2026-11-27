@@ -1,6 +1,7 @@
-//! GitHub Actions, like VS Code's extension: the repository's latest workflow runs, their jobs,
-//! re-run / cancel / start a workflow and read a run's log. Through the GitHub CLI (`gh`), which
-//! already holds the user's sign-in.
+//! The repository's CI, like VS Code's GitHub Actions view: the latest runs (GitHub Actions,
+//! GitLab pipelines, Gitea / Forgejo Actions), their jobs, re-run / cancel / start one and read a
+//! run's log. GitHub through its CLI (`gh`), which holds the sign-in; the others through
+//! [`super::forge`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,7 +16,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde::Deserialize;
 
+use super::forge::{self, Forge, Op};
 use crate::i18n::t;
+use gpui_kit::component::input::{Input, InputState};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -33,15 +36,18 @@ pub struct Run {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct Job {
+    #[serde(default, alias = "databaseId")]
+    pub id: u64,
     pub name: String,
     pub status: String,
     pub conclusion: String,
     pub url: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Workflow {
-    pub id: u64,
+    /// What starts it: GitHub's id, Gitea's file name (empty for GitLab's pipeline).
+    pub id: String,
     pub name: String,
     pub state: String,
 }
@@ -66,12 +72,12 @@ fn gh(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-pub fn runs(root: &Path) -> Result<Vec<Run>> {
+pub fn gh_runs(root: &Path) -> Result<Vec<Run>> {
     let json = gh(root, &["run", "list", "-L", "20", "--json", "databaseId,displayTitle,workflowName,headBranch,event,status,conclusion,createdAt,url"])?;
     Ok(serde_json::from_str(&json)?)
 }
 
-pub fn jobs(root: &Path, run: u64) -> Result<Vec<Job>> {
+pub fn gh_jobs(root: &Path, run: u64) -> Result<Vec<Job>> {
     #[derive(Deserialize)]
     struct Jobs {
         jobs: Vec<Job>,
@@ -80,12 +86,35 @@ pub fn jobs(root: &Path, run: u64) -> Result<Vec<Job>> {
     Ok(serde_json::from_str::<Jobs>(&json)?.jobs)
 }
 
-pub fn workflows(root: &Path) -> Result<Vec<Workflow>> {
-    Ok(serde_json::from_str(&gh(root, &["workflow", "list", "--json", "id,name,state"])?)?)
+pub fn gh_workflows(root: &Path) -> Result<Vec<Workflow>> {
+    #[derive(Deserialize)]
+    struct Gh {
+        id: u64,
+        name: String,
+        state: String,
+    }
+    let list: Vec<Gh> = serde_json::from_str(&gh(root, &["workflow", "list", "--json", "id,name,state"])?)?;
+    Ok(list.into_iter().map(|w| Workflow { id: w.id.to_string(), name: w.name, state: w.state }).collect())
+}
+
+pub fn gh_act(root: &Path, op: Op) -> Result<()> {
+    let args: Vec<String> = match op {
+        Op::Cancel(id) => vec!["run".into(), "cancel".into(), id.to_string()],
+        Op::Rerun(id) => vec!["run".into(), "rerun".into(), id.to_string()],
+        // On the current branch; it needs `on: workflow_dispatch`, else gh says so.
+        Op::Dispatch(id, branch) => {
+            let mut a = vec!["workflow".into(), "run".into(), id];
+            if !branch.is_empty() {
+                a.extend(["--ref".into(), branch]);
+            }
+            a
+        }
+    };
+    gh(root, &args.iter().map(String::as_str).collect::<Vec<_>>()).map(drop)
 }
 
 /// The run's log: only the failed steps when it failed (the whole log is huge).
-pub fn log(root: &Path, run: &Run) -> Result<String> {
+pub fn gh_log(root: &Path, run: &Run) -> Result<String> {
     let id = run.database_id.to_string();
     let failed = run.conclusion == "failure";
     gh(root, &["run", "view", &id, if failed { "--log-failed" } else { "--log" }])
@@ -134,6 +163,11 @@ pub enum ActionsEvent {
 
 pub struct ActionsView {
     root: PathBuf,
+    /// The server, once recognised.
+    forge: Option<Forge>,
+    /// The server refused or wanted a sign-in: the token field is shown.
+    needs_token: bool,
+    token: Entity<InputState>,
     runs: Vec<Run>,
     workflows: Vec<Workflow>,
     /// The run whose jobs are shown, and its jobs.
@@ -147,14 +181,16 @@ pub struct ActionsView {
 impl EventEmitter<ActionsEvent> for ActionsView {}
 
 impl ActionsView {
-    pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut this = Self { root, runs: vec![], workflows: vec![], expanded: None, error: None, loading: false, collapsed: false, _poll: None };
+    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let token = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("Access token")));
+        let mut this = Self { root, forge: None, needs_token: false, token, runs: vec![], workflows: vec![], expanded: None, error: None, loading: false, collapsed: false, _poll: None };
         this.refresh(cx);
         this
     }
 
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.root = root;
+        self.forge = None;
         self.runs.clear();
         self.expanded = None;
         self.refresh(cx);
@@ -162,22 +198,38 @@ impl ActionsView {
 
     /// Read the runs again; while one is running, again every 10 s (as VS Code's view does).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let root = self.root.clone();
+        let (root, known) = (self.root.clone(), self.forge.clone());
         let expanded = self.expanded.as_ref().map(|(id, _)| *id);
         self.loading = true;
         cx.notify();
         self._poll = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let runs = runs(&root)?;
-                    let workflows = workflows(&root).unwrap_or_default();
-                    let jobs = expanded.map(|id| (id, jobs(&root, id).unwrap_or_default()));
-                    Ok::<_, anyhow::Error>((runs, workflows, jobs))
+                    let forge = match known {
+                        Some(f) => f,
+                        None => forge::detect(&root)?,
+                    };
+                    let found = forge.clone();
+                    let fetched = (|| {
+                        let runs = forge::runs(&forge)?;
+                        let workflows = forge::workflows(&forge).unwrap_or_default();
+                        let jobs = expanded.map(|id| (id, forge::jobs(&forge, id).unwrap_or_default()));
+                        Ok::<_, anyhow::Error>((runs, workflows, jobs))
+                    })();
+                    Ok::<_, anyhow::Error>((found, fetched))
                 })
                 .await;
             let again = this
                 .update(cx, |this, cx| {
                     this.loading = false;
+                    let result = match result {
+                        Ok((found, fetched)) => {
+                            this.forge = Some(found);
+                            fetched
+                        }
+                        Err(e) => Err(e),
+                    };
+                    this.needs_token = result.as_ref().err().is_some_and(forge::needs_token);
                     match result {
                         Ok((runs, workflows, jobs)) => {
                             this.error = None;
@@ -187,6 +239,7 @@ impl ActionsView {
                                 this.expanded = jobs;
                             }
                         }
+                        Err(e) if forge::needs_token(&e) => this.error = Some(t("Sign-in needed: paste an access token for this server.").into()),
                         Err(e) => this.error = Some(e.to_string()),
                     }
                     cx.notify();
@@ -200,11 +253,11 @@ impl ActionsView {
         }));
     }
 
-    /// Run `gh` for an action on a run, then read the runs again.
-    fn act(&mut self, args: Vec<String>, cx: &mut Context<Self>) {
-        let root = self.root.clone();
+    /// Cancel, re-run or start a run on the server, then read the runs again.
+    fn act(&mut self, op: Op, cx: &mut Context<Self>) {
+        let Some(forge) = self.forge.clone() else { return };
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { gh(&root, &args.iter().map(String::as_str).collect::<Vec<_>>()) }).await;
+            let result = cx.background_spawn(async move { forge::act(&forge, op) }).await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(e) = result {
                     this.error = Some(e.to_string());
@@ -220,10 +273,10 @@ impl ActionsView {
             self.expanded = None;
             return cx.notify();
         }
+        let Some(forge) = self.forge.clone() else { return };
         self.expanded = Some((id, vec![]));
-        let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let jobs = cx.background_spawn(async move { jobs(&root, id) }).await;
+            let jobs = cx.background_spawn(async move { forge::jobs(&forge, id) }).await;
             let _ = this.update(cx, |this, cx| {
                 match jobs {
                     Ok(jobs) if this.expanded.as_ref().is_some_and(|(e, _)| *e == id) => this.expanded = Some((id, jobs)),
@@ -237,11 +290,11 @@ impl ActionsView {
     }
 
     fn show_log(&mut self, run: Run, cx: &mut Context<Self>) {
-        let root = self.root.clone();
+        let Some(forge) = self.forge.clone() else { return };
         cx.spawn(async move |this, cx| {
             let log = cx.background_spawn({
                 let run = run.clone();
-                async move { log(&root, &run) }
+                async move { forge::log(&forge, &run) }
             })
             .await;
             let _ = this.update(cx, |this, cx| match log {
@@ -287,12 +340,12 @@ impl ActionsView {
                             .group_hover(SharedString::from(format!("run-{id}")), |s| s.visible())
                             .child(action("log", IconName::ScrollText, "Show the log").on_click(cx.listener(move |this, _, _, cx| this.show_log(r1.clone(), cx))))
                             .when(run.running(), |el| {
-                                el.child(action("cancel", IconName::Square, "Cancel").on_click(cx.listener(move |this, _, _, cx| this.act(vec!["run".into(), "cancel".into(), r2.database_id.to_string()], cx))))
+                                el.child(action("cancel", IconName::Square, "Cancel").on_click(cx.listener(move |this, _, _, cx| this.act(Op::Cancel(r2.database_id), cx))))
                             })
                             .when(!run.running(), |el| {
-                                el.child(action("rerun", IconName::RefreshCw, "Re-run").on_click(cx.listener(move |this, _, _, cx| this.act(vec!["run".into(), "rerun".into(), r3.database_id.to_string()], cx))))
+                                el.child(action("rerun", IconName::RefreshCw, "Re-run").on_click(cx.listener(move |this, _, _, cx| this.act(Op::Rerun(r3.database_id), cx))))
                             })
-                            .child(action("open", IconName::ExternalLink, "Open on GitHub").on_click(move |_, _, cx| cx.open_url(&url))),
+                            .child(action("open", IconName::ExternalLink, "Open in the browser").on_click(move |_, _, cx| cx.open_url(&url))),
                     ),
             )
             .when_some(open, |el, jobs| {
@@ -339,7 +392,7 @@ impl Render for ActionsView {
                         cx.notify();
                     }))
                     .child(div().text_color(theme.muted_foreground).child(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }))
-                    .child(div().flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(t("GITHUB ACTIONS")))
+                    .child(div().flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(self.forge.as_ref().map_or("CI", |f| f.kind.title())))
                     .when(self.loading, |el| el.child(Spinner::new().xsmall()))
                     .child(Button::new("actions-run").ghost().xsmall().icon(IconName::Play).tooltip(t("Run a workflow")).dropdown_menu(move |mut menu, _, _| {
                         let manual: Vec<&Workflow> = workflows.iter().filter(|w| w.state == "active").collect();
@@ -347,15 +400,11 @@ impl Render for ActionsView {
                             menu = menu.label(t("No workflow"));
                         }
                         for w in manual {
-                            let (view, id, root) = (view.clone(), w.id.to_string(), branch_root.clone());
+                            let (view, id, root) = (view.clone(), w.id.clone(), branch_root.clone());
                             menu = menu.item(PopupMenuItem::new(w.name.clone()).on_click(move |_, _, cx| {
-                                // On the current branch; it needs `on: workflow_dispatch`, else gh says so.
+                                // On the current branch.
                                 let branch = crate::git::Repo::discover(&root).and_then(|r| r.status().ok()).map(|s| s.branch).unwrap_or_default();
-                                let mut args = vec!["workflow".to_string(), "run".into(), id.clone()];
-                                if !branch.is_empty() {
-                                    args.extend(["--ref".into(), branch]);
-                                }
-                                let _ = view.update(cx, |this, cx| this.act(args, cx));
+                                let _ = view.update(cx, |this, cx| this.act(Op::Dispatch(id.clone(), branch), cx));
                             }));
                         }
                         menu
@@ -364,6 +413,26 @@ impl Render for ActionsView {
             )
             .when(!collapsed, |el| {
                 el.when_some(self.error.clone(), |el, e| el.child(div().px_3().py_1().text_xs().text_color(theme.danger).child(e)))
+                    .when_some(self.forge.clone().filter(|f| self.needs_token && f.kind != forge::Kind::GitHub), |el, f| {
+                        let page = forge::token_page(&f);
+                        el.child(
+                            h_flex()
+                                .px_2()
+                                .gap_1()
+                                .child(div().flex_1().child(Input::new(&self.token).xsmall()))
+                                .child(Button::new("token-save").xsmall().primary().label(t("Save")).on_click(cx.listener(move |this, _, window, cx| {
+                                    let token = this.token.read(cx).value().to_string();
+                                    match forge::save_token(&f.base, &token) {
+                                        Ok(()) => {
+                                            this.token.update(cx, |i, cx| i.set_value("", window, cx));
+                                            this.refresh(cx);
+                                        }
+                                        Err(e) => this.error = Some(e.to_string()),
+                                    }
+                                })))
+                                .child(Button::new("token-create").xsmall().ghost().icon(IconName::ExternalLink).tooltip(t("Create a token")).on_click(move |_, _, cx| cx.open_url(&page))),
+                        )
+                    })
                     .when(self.runs.is_empty() && self.error.is_none() && !self.loading, |el| {
                         el.child(div().px_3().py_1().text_xs().text_color(theme.muted_foreground).child(t("No workflow run yet.")))
                     })
@@ -389,10 +458,12 @@ mod tests {
     #[ignore]
     fn live_runs_of_this_repository() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let runs = super::runs(root).unwrap();
+        let forge = super::forge::detect(root).unwrap();
+        assert_eq!(forge.kind, super::forge::Kind::GitHub);
+        let runs = super::forge::runs(&forge).unwrap();
         eprintln!("{runs:#?}");
         let first = runs.first().expect("a run");
-        eprintln!("{:#?}", super::jobs(root, first.database_id).unwrap());
-        eprintln!("{:#?}", super::workflows(root).unwrap());
+        eprintln!("{:#?}", super::gh_jobs(root, first.database_id).unwrap());
+        eprintln!("{:#?}", super::gh_workflows(root).unwrap());
     }
 }

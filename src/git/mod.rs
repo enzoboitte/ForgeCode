@@ -2,6 +2,7 @@
 //! Blocking: call from background tasks.
 
 pub mod actions;
+pub mod forge;
 pub mod graph;
 pub mod panel;
 
