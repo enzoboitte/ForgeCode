@@ -71,7 +71,11 @@ pub fn plan(root: &Path, file: &Path, lsp_id: &str) -> Option<Plan> {
 /// Installs the adapter when missing. Blocking.
 pub fn command(adapter: Adapter, settings: &LangSettings, root: &Path) -> Result<(Vec<String>, bool)> {
     Ok(match adapter {
-        Adapter::Lldb => (super::dap::adapter_command()?, false),
+        Adapter::Lldb => {
+            let argv = super::dap::adapter_command()?;
+            let tcp = argv.iter().any(|a| a.contains("{port}"));
+            (argv, tcp)
+        }
         Adapter::Python => {
             let venv = tools_dir().join("debugpy");
             let python = venv_python(&venv);
@@ -178,7 +182,7 @@ fn run(cmd: &mut Command) -> Result<String> {
 }
 
 /// Download URL of the latest release asset of `repo` whose name matches.
-fn github_asset(repo: &str, matches: impl Fn(&str) -> bool) -> Result<String> {
+pub fn github_asset(repo: &str, matches: impl Fn(&str) -> bool) -> Result<String> {
     let release: Value = ureq::get(&format!("https://api.github.com/repos/{repo}/releases/latest")).call()?.into_json()?;
     release["assets"]
         .as_array()

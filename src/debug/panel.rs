@@ -233,7 +233,7 @@ impl DebugPanel {
         let (client, port, gdb) = cx
             .background_spawn(async move {
                 let (argv, tcp) = adapters::command(adapter, &settings, &dir)?;
-                let gdb = dap::is_gdb(&argv);
+                let gdb = dap::env_as_object(&argv);
                 if tcp {
                     let port = dap::free_port()?;
                     anyhow::Ok((DapClient::start_tcp(&argv, &dir, port, events)?, Some(port), gdb))
@@ -243,7 +243,7 @@ impl DebugPanel {
             })
             .await?;
         if gdb {
-            launch = dap::for_gdb(launch);
+            launch = dap::adapt_launch(launch);
         }
         this.update(cx, |this, cx| {
             this.client = Some(client.clone());

@@ -160,8 +160,9 @@ fn handle_incoming(msg: Value, pending: &Pending, writer: Option<&Writer>, event
     }
 }
 
-/// The debug adapter command line: `lldb-dap` from Xcode (macOS), the PATH (`lldb-vscode` on older
-/// LLVM) or LLVM's folders; else GDB 14+ and its built-in DAP (MinGW, Linux distributions).
+/// The debug adapter command line, whatever the machine has: `lldb-dap` from Xcode (macOS), the
+/// PATH (`lldb-vscode` on older LLVM) or LLVM's folders; else GDB 14+ and its built-in DAP (MinGW,
+/// Linux distributions); else CodeLLDB (VS Code's), downloaded once. `{port}`: a TCP adapter.
 pub fn adapter_command() -> anyhow::Result<Vec<String>> {
     #[cfg(target_os = "macos")]
     if let Ok(out) = crate::util::command("xcrun").args(["-f", "lldb-dap"]).output() {
@@ -197,9 +198,41 @@ pub fn adapter_command() -> anyhow::Result<Vec<String>> {
         if gdb_version(&version).is_some_and(|v| v >= 14) {
             return Ok(vec![gdb.display().to_string(), "--interpreter=dap".into()]);
         }
-        anyhow::bail!("{} ({}): {}", crate::i18n::t("GDB is too old for debugging in ForgeCode, version 14 or later is needed"), gdb.display(), version.lines().next().unwrap_or(""));
     }
-    anyhow::bail!("{}", crate::i18n::t("No C/C++ debugger found: install LLVM (lldb-dap) or GDB 14+ (shipped with MinGW / MSYS2)"))
+    codelldb()
+}
+
+/// CodeLLDB's adapter with its own LLDB (MIT, github.com/vadimcn/codelldb), installed under the
+/// tools folder the first time: debugs MSVC (PDB) and GCC / Clang (DWARF) programs on every OS.
+pub fn codelldb() -> anyhow::Result<Vec<String>> {
+    use anyhow::Context as _;
+    let dir = crate::lsp::install::tools_dir().join("codelldb");
+    let ext = dir.join("extension");
+    let exe = ext.join("adapter").join(format!("codelldb{}", std::env::consts::EXE_SUFFIX));
+    if !exe.is_file() {
+        let os = if cfg!(windows) { "win32" } else if cfg!(target_os = "macos") { "darwin" } else { "linux" };
+        let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "x64" };
+        let asset = format!("codelldb-{os}-{arch}.vsix");
+        let url = super::adapters::github_asset("vadimcn/codelldb", |n| n == asset).with_context(|| crate::i18n::t("No C/C++ debugger found and CodeLLDB could not be downloaded").to_string())?;
+        std::fs::create_dir_all(&dir)?;
+        // A .vsix is a zip.
+        crate::lsp::install::unpack_url_into(&url, "codelldb.zip", &dir)?;
+        #[cfg(unix)]
+        for sub in ["adapter", "lldb/bin"] {
+            use std::os::unix::fs::PermissionsExt;
+            for entry in std::fs::read_dir(ext.join(sub)).into_iter().flatten().flatten() {
+                let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        anyhow::ensure!(exe.is_file(), "{} {}", exe.display(), crate::i18n::t("missing after the download"));
+    }
+    let mut argv = vec![exe.display().to_string()];
+    let lib = ["lldb/bin/liblldb.dll", "lldb/lib/liblldb.dylib", "lldb/lib/liblldb.so"].iter().map(|l| ext.join(l)).find(|l| l.is_file());
+    if let Some(lib) = lib {
+        argv.extend(["--liblldb".into(), lib.display().to_string()]);
+    }
+    argv.extend(["--port".into(), "{port}".into()]);
+    Ok(argv)
 }
 
 /// `GNU gdb (GDB) 16.2` → 16.
@@ -207,13 +240,13 @@ fn gdb_version(text: &str) -> Option<u32> {
     text.lines().next()?.split_whitespace().find_map(|w| w.split('.').next()?.parse().ok().filter(|_| w.contains('.')))
 }
 
-/// Whether the adapter is GDB's own DAP (its launch arguments differ from lldb-dap's).
-pub fn is_gdb(argv: &[String]) -> bool {
-    argv.iter().any(|a| a == "--interpreter=dap")
+/// Whether the adapter is GDB's own DAP or CodeLLDB: they take `env` as an object, not a list.
+pub fn env_as_object(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--interpreter=dap") || argv.first().is_some_and(|p| std::path::Path::new(p).file_stem().is_some_and(|s| s == "codelldb"))
 }
 
-/// lldb-dap's launch arguments in GDB's words: `env` as an object, its own stop-at-main flag.
-pub fn for_gdb(mut launch: Value) -> Value {
+/// lldb-dap's launch arguments for GDB / CodeLLDB: `env` as an object, GDB's stop-at-main flag.
+pub fn adapt_launch(mut launch: Value) -> Value {
     if let Some(env) = launch["env"].as_array() {
         let map: serde_json::Map<String, Value> = env.iter().filter_map(|e| e.as_str()?.split_once('=')).map(|(k, v)| (k.to_string(), v.into())).collect();
         launch["env"] = map.into();
@@ -242,9 +275,11 @@ mod tests {
     fn speaks_gdb_s_launch_dialect() {
         assert_eq!(gdb_version("GNU gdb (GDB) 16.2\nCopyright"), Some(16));
         assert_eq!(gdb_version("GNU gdb (Ubuntu 12.1-0ubuntu1) 12.1"), Some(12));
-        let launch = for_gdb(serde_json::json!({"program": "a", "env": ["PATH=C:\\deps", "X=1=2"], "stopOnEntry": true}));
+        let launch = adapt_launch(serde_json::json!({"program": "a", "env": ["PATH=C:\\deps", "X=1=2"], "stopOnEntry": true}));
         assert_eq!((launch["env"]["PATH"].as_str(), launch["env"]["X"].as_str(), launch["stopAtBeginningOfMainSubprogram"].as_bool()), (Some("C:\\deps"), Some("1=2"), Some(true)));
-        assert!(is_gdb(&["gdb".into(), "--interpreter=dap".into()]));
+        assert!(env_as_object(&["gdb".into(), "--interpreter=dap".into()]));
+        assert!(env_as_object(&["/t/codelldb/extension/adapter/codelldb.exe".into(), "--port".into(), "{port}".into()]));
+        assert!(!env_as_object(&["/usr/bin/lldb-dap".into()]));
     }
 
     #[test]
@@ -260,7 +295,7 @@ not json
     #[test]
     fn lldb_dap_stops_at_breakpoint() {
         let Ok(adapter) = adapter_command() else { return eprintln!("no debugger installed, skipping") };
-        if is_gdb(&adapter) || crate::util::command(&adapter[0]).arg("--help").output().is_err() {
+        if env_as_object(&adapter) || crate::util::command(&adapter[0]).arg("--help").output().is_err() {
             return eprintln!("lldb-dap not installed, skipping");
         }
         let dir = std::env::temp_dir().join(format!("forge-dap-{}", std::process::id()));
