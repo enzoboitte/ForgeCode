@@ -104,6 +104,8 @@ pub struct ChatPanel {
     cancel: Option<Arc<AtomicBool>>,
     /// Stops and messages for single agents of the current run.
     control: Option<Arc<agent::Control>>,
+    /// The mode the running agents follow; the picker changes it mid-run.
+    live_mode: Arc<std::sync::Mutex<Mode>>,
     approval: Option<Approval>,
     pub workspace: PathBuf,
     pub active_file: Option<PathBuf>,
@@ -381,6 +383,11 @@ fn summarize(args: &str) -> String {
         .unwrap_or_default()
 }
 
+fn last_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.trim_end().lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
 fn first_lines(s: &str, n: usize) -> String {
     let mut out: String = s.lines().take(n).collect::<Vec<_>>().join("\n");
     if s.lines().count() > n {
@@ -438,6 +445,7 @@ impl ChatPanel {
             history: vec![],
             cancel: None,
             control: None,
+            live_mode: Arc::new(std::sync::Mutex::new(Mode::Ask)),
             approval: None,
             workspace,
             active_file: None,
@@ -914,7 +922,8 @@ impl ChatPanel {
         self.cancel = Some(cancel.clone());
         let history = self.history.clone();
         let (tx, rx) = smol::channel::unbounded();
-        let rt = Runtime::new(tx, cancel, mode, resolver, catalog, model, settings.review_model.clone(), settings.agent_delegation, settings.ai_context_chars);
+        *self.live_mode.lock().unwrap() = mode;
+        let rt = Runtime::new(tx, cancel, self.live_mode.clone(), resolver, catalog, model, settings.review_model.clone(), settings.agent_delegation, settings.ai_context_chars);
         self.control = Some(rt.control.clone());
         std::thread::spawn(move || agent::run(Arc::new(rt), toolbox, history));
         self._task = Some(cx.spawn(async move |this, cx| {
@@ -976,6 +985,13 @@ impl ChatPanel {
                 let summary = summarize(&args);
                 let summary = self.relative(&summary);
                 self.push(Item::Tool { name, summary, output: String::new(), state: ToolState::Running, expanded: false, review: None }, cx)
+            }
+            AgentEvent::ToolOutput(fresh) => {
+                if let Some(Item::Tool { output, .. }) = self.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { state: ToolState::Running, .. })) {
+                    output.push_str(&fresh);
+                }
+                self.to_bottom = true;
+                cx.notify();
             }
             AgentEvent::ToolResult { output: out } => {
                 if let Some(Item::Tool { output, state, .. }) = self.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { state: ToolState::Running, .. })) {
@@ -1098,6 +1114,25 @@ impl ChatPanel {
     fn run_plan(&mut self, cx: &mut Context<Self>) {
         Settings::update(cx, |s| s.agent_mode = Mode::Review.id().into());
         self.send(t("Execute the plan above, step by step.").into(), cx);
+    }
+
+    /// Pick the chat mode; agents already running follow it from their next step.
+    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        Settings::update(cx, |s| s.agent_mode = mode.id().into());
+        *self.live_mode.lock().unwrap() = mode;
+        // Auto approves what was waiting for the user, as it would have from the start.
+        if mode == Mode::Auto && self.approval.as_ref().is_some_and(|a| a.name != agent::CONTINUE) {
+            self.answer(true, cx);
+        }
+        cx.notify();
+    }
+
+    /// The running command goes on in the background and the agent continues.
+    fn to_background(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = &self.control {
+            c.background(0);
+        }
+        cx.notify();
     }
 
     fn answer(&mut self, allow: bool, cx: &mut Context<Self>) {
@@ -1236,9 +1271,14 @@ impl ChatPanel {
                                     .child(IconName::ShieldCheck)
                                     .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(format!("{} - {reason}", t(if ok { "Approved" } else { "Refused" }))).build(w, cx)))
                             })
+                            .when(*state == ToolState::Running && name == "bash", |el| {
+                                el.child(Button::new(("to-bg", ix)).ghost().xsmall().label(t("Background")).tooltip(t("Let it run in the background and go on"))
+                                    .on_click(cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.to_background(cx) })))
+                            })
                             .child(div().text_color(color).child(status)),
                     )
-                    .when(*expanded && !output.is_empty(), |el| {
+                    // A running command shows its latest output as it comes.
+                    .when((*expanded || *state == ToolState::Running) && !output.is_empty(), |el| {
                         el.child(
                             div()
                                 .id(("tool-out", ix))
@@ -1251,7 +1291,7 @@ impl ChatPanel {
                                 .bg(theme.secondary)
                                 .text_xs()
                                 .font_family(theme.mono_font_family.clone())
-                                .child(SelectableText::new(("tool-out-text", ix), first_lines(output, 200)).selection_color(theme.selection)),
+                                .child(SelectableText::new(("tool-out-text", ix), if *state == ToolState::Running { last_lines(output, 12) } else { first_lines(output, 200) }).selection_color(theme.selection)),
                         )
                     })
                     .into_any_element()
@@ -1299,10 +1339,12 @@ impl ChatPanel {
 
     fn render_mode_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = Mode::parse(&Settings::get(cx).agent_mode);
+        let view = cx.entity().downgrade();
         Button::new("mode-picker").ghost().xsmall().label(t(current.label())).dropdown_menu(move |mut menu, _, _| {
             for m in Mode::ALL {
+                let view = view.clone();
                 menu = menu.item(PopupMenuItem::new(t(m.label())).checked(m == current).on_click(move |_, _, cx| {
-                    Settings::update(cx, |s| s.agent_mode = m.id().into());
+                    let _ = view.update(cx, |this, cx| this.set_mode(m, cx));
                 }));
             }
             menu
@@ -1381,7 +1423,20 @@ impl ChatPanel {
             .when(waiting, |el| {
                 el.child(h_flex().gap_2().text_xs().text_color(theme.muted_foreground).child(Spinner::new().xsmall()).child(t("Working…")))
             })
-            .when_some(self.approval.as_ref(), |el, a| {
+            .when_some(self.approval.as_ref().filter(|a| a.name == agent::CONTINUE), |el, _| {
+                // Many steps in: go on or pause, like VS Code's "Continue to iterate?".
+                el.child(
+                    v_flex().gap_2().p_3().rounded_lg().border_1().border_color(theme.border).bg(theme.background)
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(t("Continue to iterate?")))
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(t("The agent has been working on this for a while. It can go on, or you can pause and send a new message to guide it.")))
+                        .child(
+                            h_flex().gap_2().justify_end()
+                                .child(Button::new("pause-run").small().ghost().label(t("Pause")).on_click(cx.listener(|t, _, _, cx| t.answer(false, cx))))
+                                .child(Button::new("continue-run").small().primary().label(t("Continue")).on_click(cx.listener(|t, _, _, cx| t.answer(true, cx)))),
+                        ),
+                )
+            })
+            .when_some(self.approval.as_ref().filter(|a| a.name != agent::CONTINUE), |el, a| {
                 el.child(
                     v_flex()
                         .gap_2()

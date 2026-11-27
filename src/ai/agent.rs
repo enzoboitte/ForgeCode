@@ -11,9 +11,12 @@ use super::copilot::{Copilot, with_failover};
 use super::llm::{Endpoint, Reply, ToolCall};
 use super::models::{ModelInfo, Resolver, Tier, describe};
 use super::sampling::{self, Purpose};
-use super::tools::{READ_ONLY, SideEffect, Toolbox};
+use super::tools::{READ_ONLY, SideEffect, Signal, Toolbox};
 
+/// Steps before asking the user whether to go on, like VS Code's `chat.agent.maxRequests`.
 const MAX_STEPS: usize = 40;
+/// Name of the approval asking to go on after `MAX_STEPS`.
+pub const CONTINUE: &str = "continue";
 const MAX_READS_IN_A_ROW: usize = 8;
 const REPEATED_READ: &str = "You already ran this exact call; its result is above. Don't explore again: act now (edit or write files, delegate) or give your answer.";
 const TOO_MANY_READS: &str = "\n\nNote: you have only been reading for a while. Stop exploring: make the change, delegate, or give your answer.";
@@ -72,6 +75,8 @@ pub enum AgentEvent {
     Spawned { parent: Option<usize>, role: String, model: String, task: String },
     Text(String),
     ToolStart { name: String, args: String },
+    /// New output of the running command.
+    ToolOutput(String),
     ToolResult { output: String },
     /// The security reviewer's verdict on a tool call.
     Review { name: String, allowed: bool, reason: String },
@@ -150,6 +155,8 @@ impl Backend {
 #[derive(Default)]
 pub struct Control {
     stopped: Mutex<std::collections::HashSet<usize>>,
+    /// Agents whose running command should go on in the background.
+    background: Mutex<std::collections::HashSet<usize>>,
     inbox: Mutex<std::collections::HashMap<usize, Vec<String>>>,
 }
 
@@ -160,6 +167,15 @@ impl Control {
 
     pub fn is_stopped(&self, agent: usize) -> bool {
         self.stopped.lock().unwrap().contains(&agent)
+    }
+
+    /// Stop waiting for the agent's running command; it keeps running as a job.
+    pub fn background(&self, agent: usize) {
+        self.background.lock().unwrap().insert(agent);
+    }
+
+    fn take_background(&self, agent: usize) -> bool {
+        self.background.lock().unwrap().remove(&agent)
     }
 
     /// Queue a message; the agent reads it before its next step.
@@ -176,7 +192,8 @@ impl Control {
 pub struct Runtime {
     pub events: Events,
     pub cancel: Arc<AtomicBool>,
-    pub mode: Mode,
+    /// Changed by the user while the agents work; read before each step.
+    pub mode: Arc<Mutex<Mode>>,
     pub resolver: Resolver,
     pub catalog: Vec<ModelInfo>,
     pub main_model: String,
@@ -194,7 +211,7 @@ impl Runtime {
     pub fn new(
         events: Events,
         cancel: Arc<AtomicBool>,
-        mode: Mode,
+        mode: Arc<Mutex<Mode>>,
         resolver: Resolver,
         catalog: Vec<ModelInfo>,
         main_model: String,
@@ -207,6 +224,10 @@ impl Runtime {
 
     fn send(&self, agent: usize, event: AgentEvent) {
         let _ = self.events.send_blocking((agent, event));
+    }
+
+    fn mode(&self) -> Mode {
+        *self.mode.lock().unwrap()
     }
 
     fn cancelled(&self) -> bool {
@@ -223,6 +244,28 @@ pub fn system_prompt(toolbox: &Toolbox, active_file: Option<&str>, mode: Mode, c
         toolbox.workspace.display(),
         active_file.map(|f| format!(" The user is viewing {f}.")).unwrap_or_default(),
     );
+    p.push_str(&mode_rules(mode, catalog));
+    if delegation && !catalog.is_empty() {
+        p.push_str("\nYou can `delegate` sub-tasks to new agents. They use your model: omit `model`. Pick another model (e.g. copilot/…) only for a very complex task your model cannot handle. Other models:\n");
+        for m in catalog.iter().take(25) {
+            p.push_str(&m.line());
+            p.push('\n');
+        }
+        if describe(main_model, false).tier == Tier::Small || catalog.iter().any(|m| m.model_ref == main_model && m.tier == Tier::Small) {
+            p.push_str("You are a small model: split work into small tasks; use a stronger model only for very complex reasoning.\n");
+        }
+    }
+    let project = crate::dotforge::instructions(&toolbox.workspace, Some("main"));
+    if !project.is_empty() {
+        p.push_str(&format!("\nProject instructions (.forgecode):\n{project}\n\n"));
+    }
+    p.push_str("If you cannot call tools natively, reply with exactly one block:\n```tool\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"src/main.rs\"}}\n```");
+    p
+}
+
+/// What a mode asks of the main agent, in its system prompt or when the user switches to it.
+fn mode_rules(mode: Mode, catalog: &[ModelInfo]) -> String {
+    let mut p = String::new();
     match mode {
         Mode::Plan => p.push_str("PLAN MODE: you can only read. Investigate, then answer with a numbered plan of concrete steps (files, changes, commands). Change nothing.\n"),
         Mode::Smart => {
@@ -240,21 +283,6 @@ pub fn system_prompt(toolbox: &Toolbox, active_file: Option<&str>, mode: Mode, c
         }
         _ => {}
     }
-    if delegation && !catalog.is_empty() {
-        p.push_str("\nYou can `delegate` sub-tasks to new agents. They use your model: omit `model`. Pick another model (e.g. copilot/…) only for a very complex task your model cannot handle. Other models:\n");
-        for m in catalog.iter().take(25) {
-            p.push_str(&m.line());
-            p.push('\n');
-        }
-        if describe(main_model, false).tier == Tier::Small || catalog.iter().any(|m| m.model_ref == main_model && m.tier == Tier::Small) {
-            p.push_str("You are a small model: split work into small tasks; use a stronger model only for very complex reasoning.\n");
-        }
-    }
-    let project = crate::dotforge::instructions(&toolbox.workspace, Some("main"));
-    if !project.is_empty() {
-        p.push_str(&format!("\nProject instructions (.forgecode):\n{project}\n\n"));
-    }
-    p.push_str("If you cannot call tools natively, reply with exactly one block:\n```tool\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"src/main.rs\"}}\n```");
     p
 }
 
@@ -300,12 +328,9 @@ pub fn sanitize(history: &mut Vec<Value>) {
 }
 
 /// Run the main agent (id 0) on `history`.
-pub fn run(rt: Arc<Runtime>, mut toolbox: Toolbox, mut history: Vec<Value>) {
+pub fn run(rt: Arc<Runtime>, toolbox: Toolbox, mut history: Vec<Value>) {
     sanitize(&mut history);
-    if rt.mode == Mode::Plan {
-        toolbox.allowed = Some(READ_ONLY.to_vec());
-    }
-    let purpose = if matches!(rt.mode, Mode::Smart | Mode::Plan) { Purpose::Orchestrate } else { Purpose::Code };
+    let purpose = if matches!(rt.mode(), Mode::Smart | Mode::Plan) { Purpose::Orchestrate } else { Purpose::Code };
     let backend = match rt.resolver.backend_for(&rt.main_model, purpose, Default::default()) {
         Ok(b) => b,
         Err(e) => return rt.send(0, AgentEvent::Error(e.to_string(), history)),
@@ -316,11 +341,11 @@ pub fn run(rt: Arc<Runtime>, mut toolbox: Toolbox, mut history: Vec<Value>) {
     }
 }
 
-fn run_agent(rt: &Runtime, id: usize, depth: usize, backend: &Backend, toolbox: &Toolbox, mut history: Vec<Value>) -> Result<Vec<Value>, (String, Vec<Value>)> {
-    let mut tools = toolbox.definitions();
-    if rt.delegation && depth < MAX_DEPTH {
-        tools.push(delegate_tool(&rt.catalog));
-    }
+fn run_agent(rt: &Runtime, id: usize, depth: usize, backend: &Backend, all_tools: &Toolbox, mut history: Vec<Value>) -> Result<Vec<Value>, (String, Vec<Value>)> {
+    let mut toolbox = all_tools.clone();
+    let mut tools = vec![];
+    // The main agent follows the mode the user picks, even mid-run; sub-agents keep their role's.
+    let mut mode = None;
     let mut native_tools = true;
     // Small models tend to read the same files over and over: track it to push them to act.
     let mut seen_reads = std::collections::HashSet::new();
@@ -329,9 +354,40 @@ fn run_agent(rt: &Runtime, id: usize, depth: usize, backend: &Backend, toolbox: 
     // Sub-agent settings may only be chosen after looking them up.
     let mut searched = false;
 
-    for _ in 0..MAX_STEPS {
+    let mut steps = 0;
+    loop {
         if rt.cancelled() || rt.control.is_stopped(id) {
             return Ok(history);
+        }
+        let now = (depth == 0).then(|| rt.mode());
+        if tools.is_empty() || now != mode {
+            if mode.is_some() && let Some(m) = now {
+                history.push(json!({"role": "user", "content": format!(
+                    "The user switched the chat to {} mode; from now on follow it.{}\n{}",
+                    m.label(),
+                    if m == Mode::Plan { "" } else { " You may change files and run commands again." },
+                    mode_rules(m, &rt.catalog)
+                )}));
+            }
+            mode = now;
+            toolbox = all_tools.clone();
+            if mode == Some(Mode::Plan) {
+                toolbox.allowed = Some(READ_ONLY.to_vec());
+            }
+            tools = toolbox.definitions();
+            if rt.delegation && depth < MAX_DEPTH {
+                tools.push(delegate_tool(&rt.catalog));
+            }
+        }
+        steps += 1;
+        // Like VS Code: after many steps, ask whether to go on rather than stop.
+        if steps > MAX_STEPS {
+            steps = 1;
+            let (tx, rx) = smol::channel::bounded(1);
+            rt.send(id, AgentEvent::Approval { name: CONTINUE.into(), args: String::new(), reply: tx });
+            if rx.recv_blocking() != Ok(true) {
+                return Ok(history);
+            }
         }
         for text in rt.control.take_messages(id) {
             history.push(json!({"role": "user", "content": format!("Message from the user while you work: {text}")}));
@@ -378,6 +434,7 @@ fn run_agent(rt: &Runtime, id: usize, depth: usize, backend: &Backend, toolbox: 
             for (i, _) in &jobs {
                 rt.send(id, AgentEvent::ToolStart { name: calls[*i].name.clone(), args: calls[*i].arguments.clone() });
             }
+            let toolbox = &toolbox;
             std::thread::scope(|scope| {
                 let handles: Vec<_> = jobs.iter().map(|(i, args)| (*i, scope.spawn(move || delegate(rt, id, depth, toolbox, args, searched)))).collect();
                 handles.into_iter().map(|(i, h)| (i, h.join().unwrap_or_else(|_| "Error: the sub-agent crashed".into()))).collect()
@@ -401,7 +458,7 @@ fn run_agent(rt: &Runtime, id: usize, depth: usize, backend: &Backend, toolbox: 
                     } else {
                         searches += search as usize;
                         searched |= search || call.name == "web_fetch";
-                        let out = run_call(rt, id, depth, toolbox, &call, truncated, searched);
+                        let out = run_call(rt, id, depth, &toolbox, &call, truncated, searched);
                         if read {
                             reads_in_a_row += 1;
                         } else {
@@ -429,7 +486,6 @@ fn run_agent(rt: &Runtime, id: usize, depth: usize, backend: &Backend, toolbox: 
             }
         }
     }
-    Err((format!("stopped after {MAX_STEPS} steps"), history))
 }
 
 /// Execute one (non-parallel) tool call and return what goes back to the model.
@@ -448,7 +504,18 @@ fn run_call(rt: &Runtime, id: usize, depth: usize, toolbox: &Toolbox, call: &Too
     if let Some(refusal) = gate(rt, id, toolbox, call) {
         return refusal;
     }
-    let (out, effect) = toolbox.run(&call.name, &args);
+    let (out, effect) = toolbox.run_watched(&call.name, &args, &mut |fresh| {
+        if !fresh.is_empty() {
+            rt.send(id, AgentEvent::ToolOutput(fresh.to_string()));
+        }
+        if rt.cancelled() || rt.control.is_stopped(id) {
+            Signal::Kill
+        } else if rt.control.take_background(id) {
+            Signal::Background
+        } else {
+            Signal::Wait
+        }
+    });
     if effect != SideEffect::None {
         rt.send(id, AgentEvent::Effect(effect));
     }
@@ -460,7 +527,7 @@ fn gate(rt: &Runtime, id: usize, toolbox: &Toolbox, call: &ToolCall) -> Option<S
     if !toolbox.needs_approval(&call.name) || !toolbox.is_allowed(&call.name) {
         return None; // read-only, or refused by `run` itself with a clear error
     }
-    match rt.mode {
+    match rt.mode() {
         Mode::Auto => None,
         // Like VS Code: file edits go in at once and wait in the editor for Keep / Undo,
         // which is the approval (commands and the rest are still asked first).
@@ -646,7 +713,7 @@ mod tests {
     fn chosen_sampling_requires_a_search() {
         let (tx, rx) = smol::channel::unbounded();
         let resolver = Resolver { providers: vec![], copilot: vec![] };
-        let rt = Runtime::new(tx, Default::default(), Mode::Auto, resolver, vec![], "x/m".into(), String::new(), true, 10_000);
+        let rt = Runtime::new(tx, Default::default(), Arc::new(Mutex::new(Mode::Auto)), resolver, vec![], "x/m".into(), String::new(), true, 10_000);
         let toolbox = Toolbox { workspace: std::env::temp_dir(), plugin_tools: vec![], allowed: None, checkpoint: None };
         let args = json!({"task": "t", "model": "x/m", "sampling": {"temperature": 0.1}});
         assert_eq!(delegate(&rt, 0, 0, &toolbox, &args, false), SEARCH_FIRST);

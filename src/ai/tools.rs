@@ -1,6 +1,8 @@
 //! Tools the agent can call, in the spirit of Claude Code's toolset.
 
 use std::io::Read;
+use std::process::Child;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -65,7 +67,9 @@ impl Toolbox {
             schema("list_dir", "List a directory.", json!({"path": s("Directory, default workspace root")}), &[]),
             schema("glob", "Find files by glob pattern, e.g. `src/**/*.rs`.", json!({"pattern": s("Glob pattern")}), &["pattern"]),
             schema("grep", "Search file contents with a regex. Returns path:line: text.", json!({"pattern": s("Regular expression"), "path": s("Sub-directory, optional"), "glob": s("Only files matching this glob, optional")}), &["pattern"]),
-            schema("bash", "Run a shell command in the workspace and return stdout+stderr.", json!({"command": s("Command line"), "timeout_secs": n("Default 120")}), &["command"]),
+            schema("bash", "Run a shell command in the workspace and return stdout+stderr. A command still running after timeout_secs keeps running as a background job; set background for servers, watchers and long builds.", json!({"command": s("Command line"), "timeout_secs": n("Seconds to wait before moving it to the background, default 120"), "background": json!({"type": "boolean", "description": "Start it as a background job and return at once"})}), &["command"]),
+            schema("bash_output", "Read what a background job printed since the last read, and whether it finished.", json!({"job": n("Job number"), "wait_secs": n("Wait up to this long for it to finish, optional")}), &["job"]),
+            schema("kill_job", "Stop a background job.", json!({"job": n("Job number")}), &["job"]),
             schema("open_file", "Open a file in the editor for the user, optionally at a line.", json!({"path": s("File path"), "line": n("1-based line, optional")}), &["path"]),
             schema("web_search", "Search the web. Returns titles, URLs and snippets.", json!({"query": s("Search query")}), &["query"]),
             schema("web_fetch", "Fetch a web page as plain text (docs, articles, issues).", json!({"url": s("http(s) URL")}), &["url"]),
@@ -88,7 +92,8 @@ impl Toolbox {
 
     /// Whether the user must approve this call (it writes or runs code).
     pub fn needs_approval(&self, name: &str) -> bool {
-        !READ_ONLY.contains(&name)
+        // Reading or stopping a job the agent already started runs nothing new.
+        !READ_ONLY.contains(&name) && !matches!(name, "bash_output" | "kill_job")
     }
 
     pub fn resolve(&self, path: &str) -> PathBuf {
@@ -149,14 +154,20 @@ impl Toolbox {
         }
     }
 
+    #[cfg(test)]
     pub fn run(&self, name: &str, args: &Value) -> (String, SideEffect) {
-        match self.run_inner(name, args) {
+        self.run_watched(name, args, &mut |_| Signal::Wait)
+    }
+
+    /// `run`, showing a command's output as it comes; `watch` may move it to the background or kill it.
+    pub fn run_watched(&self, name: &str, args: &Value, watch: &mut dyn FnMut(&str) -> Signal) -> (String, SideEffect) {
+        match self.run_inner(name, args, watch) {
             Ok((out, effect)) => (truncate(out), effect),
             Err(e) => (format!("Error: {e:#}"), SideEffect::None),
         }
     }
 
-    fn run_inner(&self, name: &str, a: &Value) -> Result<(String, SideEffect)> {
+    fn run_inner(&self, name: &str, a: &Value, watch: &mut dyn FnMut(&str) -> Signal) -> Result<(String, SideEffect)> {
         let normalized = Self::normalize(a);
         let a = &normalized;
         let str_arg = |k: &str| a[k].as_str().with_context(|| format!("missing argument `{k}`"));
@@ -251,8 +262,18 @@ impl Toolbox {
                 none(if out.is_empty() { "No matches".into() } else { out.join("\n") })
             }
             "bash" => {
-                let timeout = a["timeout_secs"].as_u64().unwrap_or(120);
-                Ok((run_shell(str_arg("command")?, &self.workspace, &[], timeout)?, SideEffect::WorkspaceChanged))
+                let timeout = if a["background"].as_bool() == Some(true) { 0 } else { a["timeout_secs"].as_u64().unwrap_or(120) };
+                Ok((run_job(str_arg("command")?, &self.workspace, &[], timeout, true, watch)?, SideEffect::WorkspaceChanged))
+            }
+            "bash_output" => {
+                let job = a["job"].as_u64().context("missing argument `job`")? as usize;
+                Ok((job_output(job, a["wait_secs"].as_u64().unwrap_or(0), watch)?, SideEffect::WorkspaceChanged))
+            }
+            "kill_job" => {
+                let job = a["job"].as_u64().context("missing argument `job`")? as usize;
+                let pid = jobs().lock().unwrap().get(job.wrapping_sub(1)).map(|j| j.pid).with_context(|| format!("no job {job}"))?;
+                crate::util::kill_tree(pid);
+                none(format!("Job {job} stopped."))
             }
             "open_file" => {
                 let path = self.resolve(str_arg("path")?);
@@ -285,39 +306,122 @@ impl Toolbox {
     }
 }
 
+/// What the watcher of a running command wants.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Signal {
+    Wait,
+    /// Stop waiting: the command keeps running as a background job.
+    Background,
+    Kill,
+}
+
+/// A command started by the agent, possibly still running.
+struct Job {
+    pid: u32,
+    output: Arc<Mutex<String>>,
+    child: Arc<Mutex<Child>>,
+    /// How much of `output` the agent has read.
+    read: usize,
+}
+
+fn jobs() -> &'static Mutex<Vec<Job>> {
+    static JOBS: OnceLock<Mutex<Vec<Job>>> = OnceLock::new();
+    JOBS.get_or_init(Default::default)
+}
+
 /// Run `command` in the platform shell, killing it after `timeout_secs`.
 pub fn run_shell(command: &str, cwd: &Path, env: &[(String, String)], timeout_secs: u64) -> Result<String> {
-    let mut child = crate::util::shell_command(command)
-        .current_dir(cwd)
-        .envs(env.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    run_job(command, cwd, env, timeout_secs, false, &mut |_| Signal::Wait)
+}
+
+/// Start `command` and wait for it, passing new output to `watch`. Past `timeout_secs` (or on
+/// `Signal::Background`) it keeps running as a job when `can_detach`, otherwise it is killed.
+fn run_job(command: &str, cwd: &Path, env: &[(String, String)], timeout_secs: u64, can_detach: bool, watch: &mut dyn FnMut(&str) -> Signal) -> Result<String> {
+    let mut cmd = crate::util::shell_command(command);
+    // Its own process group, so stopping it reaches what it started (compilers, servers…).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd.current_dir(cwd).envs(env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let output = Arc::new(Mutex::new(String::new()));
     // Drain pipes on threads so a chatty command cannot block on a full pipe.
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let out_t = std::thread::spawn(move || { let mut s = String::new(); let _ = stdout.read_to_string(&mut s); s });
-    let err_t = std::thread::spawn(move || { let mut s = String::new(); let _ = stderr.read_to_string(&mut s); s });
+    let readers: Vec<_> = [child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>), child.stderr.take().map(|p| Box::new(p) as _)]
+        .into_iter()
+        .flatten()
+        .map(|mut pipe| {
+            let output = output.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n @ 1..) = pipe.read(&mut buf) {
+                    output.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            })
+        })
+        .collect();
+    let pid = child.id();
+    let child = Arc::new(Mutex::new(child));
     let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
+    let mut shown = 0;
+    loop {
+        let status = child.lock().unwrap().try_wait()?;
+        let fresh = { let o = output.lock().unwrap(); let f = o[shown..].to_string(); shown = o.len(); f };
+        let signal = watch(&fresh);
+        if let Some(status) = status {
+            readers.into_iter().for_each(|r| drop(r.join()));
+            let mut out = std::mem::take(&mut *output.lock().unwrap());
+            if !status.success() {
+                out.push_str(&format!("\n[exit status: {}]", status.code().unwrap_or(-1)));
+            }
+            return Ok(out);
         }
-        if start.elapsed() > Duration::from_secs(timeout_secs) {
-            let _ = child.kill();
-            break None;
+        let timed_out = start.elapsed() >= Duration::from_secs(timeout_secs);
+        if signal == Signal::Kill || (timed_out && !can_detach) {
+            crate::util::kill_tree(pid);
+            let _ = child.lock().unwrap().wait();
+            readers.into_iter().for_each(|r| drop(r.join()));
+            let mut out = std::mem::take(&mut *output.lock().unwrap());
+            out.push_str(&if signal == Signal::Kill { "\n[stopped by the user]".to_string() } else { format!("\n[killed after {timeout_secs}s]") });
+            return Ok(out);
+        }
+        if signal == Signal::Background || timed_out {
+            let mut jobs = jobs().lock().unwrap();
+            jobs.push(Job { pid, output: output.clone(), child, read: shown });
+            let n = jobs.len();
+            let so_far = output.lock().unwrap()[..shown].to_string();
+            return Ok(format!("{so_far}\n[still running: it continues as background job {n}. Call bash_output with job {n} to read its new output or wait for it, kill_job to stop it.]"));
         }
         std::thread::sleep(Duration::from_millis(50));
-    };
-    let mut out = out_t.join().unwrap_or_default();
-    out.push_str(&err_t.join().unwrap_or_default());
-    match status {
-        None => out.push_str(&format!("\n[killed after {timeout_secs}s]")),
-        Some(s) if !s.success() => out.push_str(&format!("\n[exit status: {}]", s.code().unwrap_or(-1))),
-        _ => {}
     }
-    Ok(out)
+}
+
+/// New output of a background job, waiting up to `wait_secs` for it to finish.
+fn job_output(job: usize, wait_secs: u64, watch: &mut dyn FnMut(&str) -> Signal) -> Result<String> {
+    let (output, child) = {
+        let jobs = jobs().lock().unwrap();
+        let j = jobs.get(job.wrapping_sub(1)).with_context(|| format!("no job {job}"))?;
+        (j.output.clone(), j.child.clone())
+    };
+    let start = Instant::now();
+    let status = loop {
+        let status = child.lock().unwrap().try_wait()?;
+        if status.is_some() || start.elapsed() >= Duration::from_secs(wait_secs) || watch("") != Signal::Wait {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    // The pipes may still hold the last lines right after it exits.
+    if status.is_some() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut jobs = jobs().lock().unwrap();
+    let j = &mut jobs[job - 1];
+    let o = output.lock().unwrap();
+    let fresh = o[j.read..].to_string();
+    j.read = o.len();
+    let state = match status {
+        None => "still running".to_string(),
+        Some(s) => format!("finished, exit status {}", s.code().unwrap_or(-1)),
+    };
+    Ok(format!("{fresh}\n[job {job}: {state}]"))
 }
 
 pub fn truncate(mut s: String) -> String {
@@ -353,6 +457,11 @@ mod tests {
         assert!(tb.run("grep", &json!({"pattern": "^two"})).0.contains("a.txt:2"));
         assert!(tb.run("write_file", &json!({"path": "../escape.txt", "content": "x"})).0.starts_with("Error"));
         assert!(tb.run("bash", &json!({"command": "echo hi"})).0.contains("hi"));
+        // Too slow: it goes on in the background and its output can be read later.
+        let (out, _) = tb.run("bash", &json!({"command": "echo start; sleep 1; echo end", "timeout_secs": 0}));
+        let job = out.split("background job ").nth(1).and_then(|r| r.split('.').next()).unwrap().to_string();
+        let (later, _) = tb.run("bash_output", &json!({"job": job.parse::<u64>().unwrap(), "wait_secs": 10}));
+        assert!(later.contains("end") && later.contains("finished, exit status 0"), "{later}");
         tb.run("write_file", &json!({"file_path": "alias.txt", "contents": "ok"}));
         assert_eq!(std::fs::read_to_string(dir.join("alias.txt")).unwrap(), "ok", "argument aliases");
         let rel = dir.strip_prefix("/").unwrap().join("alias.txt").display().to_string();

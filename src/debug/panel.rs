@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::assets::IconName;
+use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -95,11 +96,9 @@ struct BuildGuard(Option<u32>);
 
 impl Drop for BuildGuard {
     fn drop(&mut self) {
-        let Some(pid) = self.0 else { return };
-        #[cfg(unix)]
-        let _ = crate::util::command("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
-        #[cfg(windows)]
-        let _ = crate::util::command("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).status();
+        if let Some(pid) = self.0 {
+            crate::util::kill_tree(pid);
+        }
     }
 }
 
@@ -505,12 +504,10 @@ impl Render for DebugPanel {
                     .child(div().ml_2().text_xs().text_color(theme.muted_foreground).child(self.status.clone())),
             )
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .items_start()
-                    .child(
-                        v_flex().w(relative(0.25)).h_full().border_r_1().border_color(theme.border)
+                // Columns resized by dragging their borders, like the main panels.
+                div().flex_1().min_h_0().child(h_resizable("debug-columns")
+                    .child(resizable_panel().size(px(240.)).size_range(px(80.)..px(1200.)).child(
+                        v_flex().size_full()
                             .child(section(t("CALL STACK")))
                             .child(v_flex().id("frames").flex_1().overflow_y_scrollbar().children(self.frames.iter().enumerate().map(|(ix, f)| {
                                 let file = f.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -520,9 +517,9 @@ impl Render for DebugPanel {
                                     .child(format!("{}  {}:{}", f.name, file, f.line))
                                     .on_click(cx.listener(move |t, _, _, cx| t.select_frame(ix, cx)))
                             }))),
-                    )
-                    .child(
-                        v_flex().w(relative(0.2)).h_full().border_r_1().border_color(theme.border)
+                    ))
+                    .child(resizable_panel().size(px(200.)).size_range(px(80.)..px(1200.)).child(
+                        v_flex().size_full()
                             .child(section(t("BREAKPOINTS")))
                             .child(v_flex().id("bps").flex_1().overflow_y_scrollbar()
                                 .when(self.breakpoints.is_empty(), |el| el.child(div().px_2().text_xs().text_color(theme.muted_foreground).child(t("F9 or click a line number"))))
@@ -536,9 +533,9 @@ impl Render for DebugPanel {
                                         .child(Button::new(("bp-rm", ix)).ghost().xsmall().icon(IconName::Close)
                                             .on_click(cx.listener(move |_, _, _, cx| cx.emit(DebugEvent::RemoveBreakpoint(p2.clone(), line)))))
                                 }))),
-                    )
-                    .child(
-                        v_flex().w(relative(0.3)).h_full().border_r_1().border_color(theme.border)
+                    ))
+                    .child(resizable_panel().size(px(280.)).size_range(px(80.)..px(1200.)).child(
+                        v_flex().size_full()
                             .child(section(t("VARIABLES")))
                             .child(v_flex().id("vars").flex_1().overflow_y_scrollbar().font_family(theme.mono_font_family.clone()).children(self.variables.iter().map(|v| {
                                 h_flex().px_2().gap_2().text_xs()
@@ -546,16 +543,16 @@ impl Render for DebugPanel {
                                     .child(div().flex_1().min_w_0().child(gpui_kit::base::SelectableText::new(SharedString::from(format!("dbg-var-{}", v.name)), v.value.clone()).selection_color(selection)))
                                     .child(div().text_color(theme.muted_foreground).child(v.ty.clone()))
                             }))),
-                    )
-                    .child(
-                        v_flex().flex_1().min_w_0().h_full()
+                    ))
+                    .child(resizable_panel().child(
+                        v_flex().size_full()
                             .child(section(t("DEBUG CONSOLE")))
                             .child(v_flex().id("dbg-console").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.console_scroll).px_2().text_xs()
                                 .font_family(theme.mono_font_family.clone())
                                 // Selectable and copyable (⌘C / Ctrl+C), lines in reading order.
                                 .children(self.console.iter().enumerate().map(|(ix, l)| div().w_full().whitespace_normal()
                                     .child(gpui_kit::base::SelectableText::new(("dbg-line", ix), l.clone()).document_order(ix as u64).selection_color(selection))))),
-                    ),
+                    ))),
             )
     }
 }

@@ -51,6 +51,14 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
 }
 
 /// A command running `script` through the platform shell (`sh -c` or `cmd /C`).
+/// Kill a process started in its own process group (unix) together with everything it started.
+pub fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    let _ = command("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+    #[cfg(windows)]
+    let _ = command("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).status();
+}
+
 pub fn shell_command(script: &str) -> std::process::Command {
     #[cfg(windows)]
     let mut cmd = {
