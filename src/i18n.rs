@@ -413,6 +413,7 @@ fn french(s: &str) -> Option<&'static str> {
         "Quit ForgeCode" => "Quitter ForgeCode",
         "Marketplace folder" => "Dossier du marketplace",
         "Current file" => "Fichier courant",
+        "Build stopped" => "Compilation arrêtée",
         "Open in the browser" => "Ouvrir dans le navigateur",
         "Access token" => "Jeton d'accès",
         "Create a token" => "Créer un jeton",

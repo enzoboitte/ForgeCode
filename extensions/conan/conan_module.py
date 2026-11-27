@@ -215,13 +215,32 @@ def build_type(arg):
     return "Debug" if (arg or "").lower() == "debug" else "Release"
 
 
-def cmd_install(arg):
+def profiles():
+    """The user's Conan profiles (`~/.conan2/profiles`), `default` first."""
+    home = os.environ.get("CONAN_HOME") or os.path.join(os.path.expanduser("~"), ".conan2")
+    try:
+        names = sorted(n for n in os.listdir(os.path.join(home, "profiles")) if not n.startswith("."))
+    except OSError:
+        names = []
+    return sorted(set(names) | {"default"}, key=lambda n: (n != "default", n))
+
+
+def settings_args(bt, profile):
+    """Build type, profile (host and build, like `-pr:h=mingw -pr:b=mingw`) and compiler for Conan."""
+    args = ["--build=missing", "-s", f"build_type={bt}"]
+    if profile and profile != "default":
+        args += [f"-pr:h={profile}", f"-pr:b={profile}"]
+    else:
+        run(["profile", "detect", "--exist-ok"], capture=True, env=detect_env())
+    return args + compiler_conf(os.path.join("build", bt))
+
+
+def cmd_install(arg, profile=""):
     path = conanfile()
     if not path:
         raise Fail("Pas de conanfile.txt ni de conanfile.py : lancez « Conan : créer un conanfile.txt ».")
-    run(["profile", "detect", "--exist-ok"], capture=True, env=detect_env())
     bt = build_type(arg)
-    args = ["install", ".", "--build=missing", "-s", f"build_type={bt}"] + compiler_conf(os.path.join("build", bt))
+    args = ["install", "."] + settings_args(bt, profile)
     with open(path, encoding="utf-8") as f:
         text = f.read()
     # Without a layout Conan writes its files at the project's root: keep them in build/.
@@ -241,8 +260,57 @@ def toolchain():
     return max(found, key=os.path.getmtime, default=None)
 
 
-def cmd_configure(arg):
-    bt = cmd_install(arg)
+def preset(bt):
+    """The configure and build presets Conan's CMakeToolchain wrote for `bt` (newest first): they
+    carry the generator and compiler of the profile (`MinGW Makefiles`, Ninja…)."""
+    found = []
+    for root, _, files in os.walk(os.path.join(WORKSPACE, "build")):
+        if "CMakePresets.json" in files:
+            found.append(os.path.join(root, "CMakePresets.json"))
+    for path in sorted(found, key=os.path.getmtime, reverse=True):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        configure = [p for p in data.get("configurePresets", []) if not p.get("hidden")]
+        mine = [p for p in configure if p.get("cacheVariables", {}).get("CMAKE_BUILD_TYPE") == bt or p["name"].lower().endswith(bt.lower())]
+        # Multi-config generators (Visual Studio) have one `conan-default` for every build type.
+        chosen = (mine or configure or [None])[0]
+        if not chosen:
+            continue
+        builds = [b["name"] for b in data.get("buildPresets", []) if b.get("configurePreset") == chosen["name"]]
+        build = next((b for b in builds if b.lower().endswith(bt.lower())), builds[0] if builds else None)
+        return chosen["name"], build
+    return None
+
+
+def copy_compile_commands():
+    """clangd reads compile_commands.json at the root: the dependencies' headers are found."""
+    found = []
+    for root, _, files in os.walk(os.path.join(WORKSPACE, "build")):
+        if "compile_commands.json" in files:
+            found.append(os.path.join(root, "compile_commands.json"))
+    if found:
+        shutil.copyfile(max(found, key=os.path.getmtime), os.path.join(WORKSPACE, "compile_commands.json"))
+        print("compile_commands.json copié à la racine (pour clangd).")
+
+
+def call(args, error):
+    print("$ " + " ".join(args), flush=True)
+    if subprocess.call(args, cwd=WORKSPACE) != 0:
+        raise Fail(error)
+
+
+def cmd_configure(arg, profile=""):
+    bt = cmd_install(arg, profile)
+    cmake = shutil.which("cmake") or "cmake"
+    found = preset(bt)
+    if found:
+        call([cmake, "--preset", found[0], "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"], "cmake a échoué")
+        copy_compile_commands()
+        forge("notify", message=f"CMake configuré avec Conan ({bt}, preset {found[0]})")
+        return found
     tc = toolchain()
     if not tc:
         raise Fail("conan_toolchain.cmake introuvable : vérifiez que le générateur CMakeToolchain est dans le conanfile.")
@@ -261,6 +329,7 @@ def cmd_configure(arg):
         print("compile_commands.json copié à la racine (pour clangd).")
     print(f"Compiler ensuite : cmake --build {out}")
     forge("notify", message=f"CMake configuré avec Conan ({bt})")
+    return None
 
 
 def run_env(bt):
@@ -270,7 +339,8 @@ def run_env(bt):
     for root, _, files in os.walk(os.path.join(WORKSPACE, "build")):
         if name in files:
             found.append(os.path.join(root, name))
-    mine = [f for f in found if os.sep + bt + os.sep in f] or found
+    # build/Debug/…, build/windows-gcc-16-debug/…
+    mine = [f for f in found if bt.lower() in os.path.relpath(f, WORKSPACE).lower()] or found
     if not mine:
         return {}
     script = max(mine, key=os.path.getmtime)
@@ -287,15 +357,21 @@ def run_env(bt):
     return env
 
 
-def cmd_build(arg):
-    """Install, configure and build for the debugger (F5), then tell ForgeCode the program's environment."""
+def cmd_build(arg, profile=""):
+    """Build for the debugger (F5), then tell ForgeCode the program's environment. A conanfile.py
+    builds with its own build() (`conan build`, as by hand); a conanfile.txt through CMake."""
     bt = build_type(arg)
-    cmd_configure(bt)
-    out = os.path.join("build", bt)
-    args = [shutil.which("cmake") or "cmake", "--build", out, "--config", bt, "--parallel"]
-    print("$ " + " ".join(args), flush=True)
-    if subprocess.call(args, cwd=WORKSPACE) != 0:
-        raise Fail("la compilation a échoué")
+    path = conanfile()
+    if path and path.endswith(".py"):
+        run(["build", "."] + settings_args(bt, profile))
+        copy_compile_commands()
+    else:
+        found = cmd_configure(bt, profile)
+        cmake = shutil.which("cmake") or "cmake"
+        if found and found[1]:
+            call([cmake, "--build", "--preset", found[1], "--parallel"], "la compilation a échoué")
+        else:
+            call([cmake, "--build", os.path.join("build", bt), "--config", bt, "--parallel"], "la compilation a échoué")
     forge("launch", env=run_env(bt), cwd=WORKSPACE)
 
 
@@ -303,13 +379,15 @@ def json_launch():
     """The ways to debug the project with Conan, for ForgeCode's F5 picker."""
     if not conanfile():
         return emit([])
+    how = "conan build" if conanfile().endswith(".py") else "conan install + CMake + build"
     emit([
         {
-            "label": f"Conan | {bt}",
-            "detail": f"conan install + CMake + build ({os.path.join('build', bt)})",
-            "build": f"conan-forge build {bt.lower()}",
-            "program_dir": os.path.join("build", bt),
+            "label": f"Conan | {bt}" + ("" if profile == "default" else f" | {profile}"),
+            "detail": f"{how} (profil {profile})",
+            "build": f"conan-forge build {bt.lower()} {profile}",
+            "program_dir": "build",
         }
+        for profile in profiles()
         for bt in ("Debug", "Release")
     ])
 
@@ -442,9 +520,9 @@ def main(argv):
         "new": lambda: cmd_new(),
         "add": lambda: cmd_add(arg),
         "search": lambda: cmd_search(arg),
-        "install": lambda: cmd_install(arg),
-        "configure": lambda: cmd_configure(arg),
-        "build": lambda: cmd_build(arg),
+        "install": lambda: cmd_install(arg, extra),
+        "configure": lambda: cmd_configure(arg, extra),
+        "build": lambda: cmd_build(arg, extra),
         "launch-json": lambda: json_launch(),
         "outdated": lambda: cmd_outdated(),
         # For ForgeCode's Conan panel.

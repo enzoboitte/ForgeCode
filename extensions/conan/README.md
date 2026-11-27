@@ -39,6 +39,6 @@ Outils pour l'IA : `conan_search`, `conan_add`, `conan_install` : le chat peut c
 
 ## Déboguer (F5)
 
-F5 propose « Conan | Debug » et « Conan | Release » : `conan install`, configuration CMake, compilation dans `build/<type>`, puis le débogueur sur le programme, avec l'environnement de `conanrun` (bibliothèques partagées des dépendances). Quand le dossier contient plusieurs programmes (l'application et ses tests), chacun a sa ligne.
+F5 propose « Conan | Debug » et « Conan | Release », pour chacun de vos profils Conan (`Conan | Debug | mingw` utilise `-pr:h=mingw -pr:b=mingw`). Un `conanfile.py` est compilé par `conan build` (sa propre méthode `build()`), un `conanfile.txt` par `conan install` puis le preset CMake que Conan a généré (son générateur : MinGW Makefiles, Ninja…). Ensuite le débogueur démarre sur le programme, avec l'environnement de `conanrun` (bibliothèques partagées des dépendances). Quand le dossier contient plusieurs programmes (l'application et ses tests), chacun a sa ligne.
 
 Le compilateur est celui réglé dans Paramètres > Langages > Compilateur C / C++ (`CC` / `CXX`, script d'environnement). Sous Windows, MSVC est trouvé même hors de son emplacement habituel ; Conan reçoit son dossier et CMake utilise Ninja (fourni avec Visual Studio).

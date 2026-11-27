@@ -18,7 +18,6 @@ use super::adapters::{self, Adapter};
 use super::dap::{self, DapClient, DapEvent};
 use crate::project::Program;
 use crate::settings::LangSettings;
-use crate::ai::tools::run_shell;
 
 pub type Breakpoints = BTreeMap<PathBuf, BTreeSet<u32>>;
 
@@ -57,12 +56,52 @@ pub struct DebugPanel {
     selected_frame: usize,
     variables: Vec<Var>,
     console: VecDeque<SharedString>,
+    /// Follows the end of the console while the build writes to it.
+    console_scroll: ScrollHandle,
+    /// The program is being built (Stop ends the build).
+    building: bool,
     /// Mirror of the workspace breakpoints, for the list.
     breakpoints: Breakpoints,
     _tasks: Vec<Task<()>>,
 }
 
 impl EventEmitter<DebugEvent> for DebugPanel {}
+
+/// Start `command` in the shell, each line of its output (stdout and stderr) sent as it comes.
+fn start_build(command: &str, cwd: &std::path::Path, env: &[(String, String)], lines: smol::channel::Sender<String>) -> anyhow::Result<std::process::Child> {
+    use std::io::BufRead as _;
+    use std::process::Stdio;
+    let mut cmd = crate::util::shell_command(command);
+    // Its own process group, so stopping reaches cmake, the compiler… too.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd.current_dir(cwd).envs(env.iter().cloned()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let pipes: [Option<Box<dyn std::io::Read + Send>>; 2] = [child.stdout.take().map(|p| Box::new(p) as _), child.stderr.take().map(|p| Box::new(p) as _)];
+    for pipe in pipes.into_iter().flatten() {
+        let tx = lines.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                if tx.send_blocking(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    Ok(child)
+}
+
+/// A build still running when its task is dropped: end it with everything it started.
+struct BuildGuard(Option<u32>);
+
+impl Drop for BuildGuard {
+    fn drop(&mut self) {
+        let Some(pid) = self.0 else { return };
+        #[cfg(unix)]
+        let _ = crate::util::command("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+        #[cfg(windows)]
+        let _ = crate::util::command("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).status();
+    }
+}
 
 impl DebugPanel {
     pub fn new() -> Self {
@@ -75,6 +114,8 @@ impl DebugPanel {
             selected_frame: 0,
             variables: vec![],
             console: VecDeque::new(),
+            console_scroll: ScrollHandle::new(),
+            building: false,
             breakpoints: Breakpoints::new(),
             _tasks: vec![],
         }
@@ -91,6 +132,7 @@ impl DebugPanel {
         while self.console.len() > 2000 {
             self.console.pop_front();
         }
+        self.console_scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -109,12 +151,30 @@ impl DebugPanel {
                         this.status = t("Building…").into();
                         this.log(format!("$ {build_cmd}"), cx);
                     });
-                    let env = plan.env.clone();
-                    // An hour: Conan may compile the dependencies from source the first time.
-                    match cx.background_spawn(async move { run_shell(&build_cmd, &ws, &env, 3600) }).await {
-                        Ok(o) => o,
+                    // Shown line by line as it builds (Conan may compile dependencies for minutes).
+                    let (tx, rx) = smol::channel::unbounded::<String>();
+                    let mut child = match start_build(&build_cmd, &ws, &plan.env, tx) {
+                        Ok(c) => c,
                         Err(e) => { let _ = this.update(cx, |this, cx| this.fail(e.to_string(), cx)); return; }
+                    };
+                    // Stop (or a new session) drops this task: the build and what it started end too.
+                    let mut guard = BuildGuard(Some(child.id()));
+                    let _ = this.update(cx, |this, _| this.building = true);
+                    let mut output = String::new();
+                    while let Ok(line) = rx.recv().await {
+                        output.push_str(&line);
+                        output.push('\n');
+                        if !line.starts_with('{') && !line.starts_with("@forge ") {
+                            let _ = this.update(cx, |this, cx| this.log(line, cx));
+                        }
                     }
+                    let ok = cx.background_spawn(async move { child.wait().is_ok_and(|s| s.success()) }).await;
+                    guard.0 = None;
+                    let _ = this.update(cx, |this, _| this.building = false);
+                    if !ok {
+                        output.push_str("\n[exit status: failed]");
+                    }
+                    output
                 }
                 None => String::new(),
             };
@@ -126,9 +186,7 @@ impl DebugPanel {
                 Program::FromCargo => dap::cargo_executable(&output),
                 Program::Newest(dir) => crate::project::newest_executable(&dir).map(|p| p.display().to_string()),
             };
-            let shown: String = output.lines().filter(|l| !l.starts_with('{') && !l.starts_with("@forge ")).collect::<Vec<_>>().join("\n");
             let failed = output.contains("[exit status");
-            let _ = this.update(cx, |this, cx| this.log(shown, cx));
             let Some(program) = program.filter(|_| !failed) else {
                 let _ = this.update(cx, |this, cx| this.fail("Build failed or produced no executable".into(), cx));
                 return;
@@ -300,6 +358,10 @@ impl DebugPanel {
             self.end(cx);
         }
         self._tasks.clear();
+        if std::mem::take(&mut self.building) {
+            self.status = t("Build stopped").into();
+            self.log("■ stopped", cx);
+        }
     }
 
     fn select_frame(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -389,6 +451,7 @@ impl Render for DebugPanel {
         let btn = |id: &'static str, icon: IconName, tip: &'static str, enabled: bool| {
             Button::new(id).ghost().xsmall().icon(icon).tooltip(t(tip)).disabled(!enabled)
         };
+        let selection = theme.selection;
         let section = |title: &'static str| div().px_2().py_1().text_xs().text_color(theme.muted_foreground).child(title);
 
         v_flex()
@@ -405,7 +468,7 @@ impl Render for DebugPanel {
                     .child(btn("dbg-over", IconName::ArrowRight, "Step over", paused).on_click(cx.listener(|t, _, _, cx| t.step_over(cx))))
                     .child(btn("dbg-in", IconName::ArrowDown, "Step into", paused).on_click(cx.listener(|t, _, _, cx| t.step_in(cx))))
                     .child(btn("dbg-out", IconName::ArrowUp, "Step out", paused).on_click(cx.listener(|t, _, _, cx| t.step_out(cx))))
-                    .child(btn("dbg-stop", IconName::Square, "Stop", active).on_click(cx.listener(|t, _, _, cx| t.stop(cx))))
+                    .child(btn("dbg-stop", IconName::Square, "Stop", active || self.building).on_click(cx.listener(|t, _, _, cx| t.stop(cx))))
                     .child(div().ml_2().text_xs().text_color(theme.muted_foreground).child(self.status.clone())),
             )
             .child(
@@ -447,17 +510,43 @@ impl Render for DebugPanel {
                             .child(v_flex().id("vars").flex_1().overflow_y_scrollbar().font_family(theme.mono_font_family.clone()).children(self.variables.iter().map(|v| {
                                 h_flex().px_2().gap_2().text_xs()
                                     .child(div().text_color(theme.blue).child(v.name.clone()))
-                                    .child(div().flex_1().truncate().child(v.value.clone()))
+                                    .child(div().flex_1().min_w_0().child(gpui_kit::base::SelectableText::new(SharedString::from(format!("dbg-var-{}", v.name)), v.value.clone()).selection_color(selection)))
                                     .child(div().text_color(theme.muted_foreground).child(v.ty.clone()))
                             }))),
                     )
                     .child(
-                        v_flex().flex_1().h_full()
+                        v_flex().flex_1().min_w_0().h_full()
                             .child(section(t("DEBUG CONSOLE")))
-                            .child(v_flex().id("dbg-console").flex_1().overflow_y_scrollbar().px_2().text_xs()
+                            .child(v_flex().id("dbg-console").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.console_scroll).px_2().text_xs()
                                 .font_family(theme.mono_font_family.clone())
-                                .children(self.console.iter().map(|l| div().whitespace_nowrap().child(l.clone())))),
+                                // Selectable and copyable (⌘C / Ctrl+C), lines in reading order.
+                                .children(self.console.iter().enumerate().map(|(ix, l)| div().w_full().whitespace_normal()
+                                    .child(gpui_kit::base::SelectableText::new(("dbg-line", ix), l.clone()).document_order(ix as u64).selection_color(selection))))),
                     ),
             )
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{BuildGuard, start_build};
+
+    /// The build's lines arrive as they are written; dropping the guard ends it and its children.
+    #[test]
+    fn streams_the_build_and_stops_it() {
+        let dir = std::env::temp_dir();
+        let (tx, rx) = smol::channel::unbounded();
+        let mut child = start_build("echo one; echo two 1>&2", &dir, &[], tx).unwrap();
+        let mut lines: Vec<String> = smol::block_on(async { let mut v = vec![]; while let Ok(l) = rx.recv().await { v.push(l) } v });
+        lines.sort();
+        assert_eq!(lines, ["one", "two"]);
+        assert!(child.wait().unwrap().success());
+
+        let (tx, _rx) = smol::channel::unbounded();
+        let mut child = start_build("sleep 30; echo late", &dir, &[], tx).unwrap();
+        let started = std::time::Instant::now();
+        drop(BuildGuard(Some(child.id())));
+        assert!(!child.wait().unwrap().success());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "stopped right away");
     }
 }

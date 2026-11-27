@@ -63,8 +63,8 @@ pub fn load_modules(cx: &mut App) {
 /// The folder to open when nothing else says: where `forgecode` was typed in a terminal, but not
 /// the app's own folder (a double click on the .exe / binary starts there) nor `/` (macOS apps).
 fn launch_dir() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?.canonicalize().ok()?;
-    let exe_dir = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).and_then(|e| e.parent().map(PathBuf::from));
+    let cwd = crate::util::canonical(&std::env::current_dir().ok()?).ok()?;
+    let exe_dir = std::env::current_exe().ok().and_then(|e| crate::util::canonical(&e).ok()).and_then(|e| e.parent().map(PathBuf::from));
     if Some(&cwd) == exe_dir.as_ref() || cwd.parent().is_none() {
         return dirs::home_dir();
     }
@@ -84,7 +84,7 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| recent::list().into_iter().next())
         .or_else(launch_dir)
-        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| crate::util::canonical(&p).ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let (root, file) = match arg.is_file() {
         true => (arg.parent().map(PathBuf::from).unwrap_or_default(), Some(arg)),

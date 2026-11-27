@@ -13,6 +13,29 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `canonicalize` without Windows' `\\?\` prefix, which cmd, make, CMake and Conan don't understand.
+pub fn canonical(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    path.canonicalize().map(plain_path)
+}
+
+/// `\\?\C:\x` → `C:\x`, `\\?\UNC\srv\x` → `\\srv\x`; other paths unchanged.
+pub fn plain_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    let s = path.to_string_lossy().into_owned();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}").into();
+    }
+    s.strip_prefix(r"\\?\").map_or(path, Into::into)
+}
+
+#[cfg(test)]
+#[test]
+fn plain_paths_drop_the_verbatim_prefix() {
+    use std::path::PathBuf;
+    assert_eq!(plain_path(PathBuf::from(r"\\?\C:\Users\me")), PathBuf::from(r"C:\Users\me"));
+    assert_eq!(plain_path(PathBuf::from(r"\\?\UNC\srv\share")), PathBuf::from(r"\\srv\share"));
+    assert_eq!(plain_path(PathBuf::from("/home/me")), PathBuf::from("/home/me"));
+}
+
 /// A program to run, without a console window on Windows: ForgeCode is a window app there, and
 /// each program it starts (git, gh, language servers, Python…) would otherwise open one.
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {

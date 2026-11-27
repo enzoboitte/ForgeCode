@@ -722,10 +722,12 @@ impl Workspace {
         div()
             .relative()
             .size_full()
+            .overflow_hidden()
             .child(
-                v_flex()
-                    .size_full()
-                    .justify_center()
+                // Scrolls when the pane is short (a tall bottom panel), centred otherwise (`my_auto`).
+                v_flex().id(("welcome", pane)).size_full().overflow_y_scroll().child(v_flex()
+                    .my_auto()
+                    .py_4()
                     .pl(relative(0.18))
                     .gap_2()
                     .text_sm()
@@ -757,7 +759,7 @@ impl Workspace {
                                     .child(div().text_xs().text_color(theme.muted_foreground).child(shown))
                                     .on_click(cx.listener(move |t, _, _, cx| t.set_root(path.clone(), cx)))
                             }))
-                    }),
+                    })),
             )
             .children(overlay)
             .into_any_element()

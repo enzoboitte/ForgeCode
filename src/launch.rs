@@ -32,7 +32,17 @@ pub fn targets(root: &Path, file: Option<(&Path, &str)>, modules: &[ModuleLaunch
     let build = |label: &str, detail: &str, cmd: &str, dir: PathBuf| Target { label: label.into(), detail: detail.into(), plan: Plan::native(Some(cmd.into()), Program::Newest(dir)) };
     match detect(root) {
         BuildSystem::CMake => all.push(build("CMake", "cmake -B build (Debug)", CMAKE_BUILD, root.join("build"))),
-        BuildSystem::Make => all.push(build("Make", "make", "make", root.to_path_buf())),
+        BuildSystem::Make => {
+            let make = make_program();
+            let targets = make_targets(root);
+            if targets.is_empty() {
+                all.push(build("Make", &make, &make, root.to_path_buf()));
+            }
+            for t in targets {
+                let cmd = format!("{make} {t}");
+                all.push(build(&format!("Make | {t}"), &cmd, &cmd, root.to_path_buf()));
+            }
+        }
         BuildSystem::Cargo => all.push(Target { label: "Cargo".into(), detail: "cargo build".into(), plan: Plan::native(Some("cargo build --message-format=json-render-diagnostics".into()), Program::FromCargo) }),
         _ => {}
     }
@@ -51,6 +61,31 @@ pub fn targets(root: &Path, file: Option<(&Path, &str)>, modules: &[ModuleLaunch
     expand_programs(unique)
 }
 
+/// `make`, or MinGW's `mingw32-make` when it is the only one.
+fn make_program() -> String {
+    let found = |p: &str| crate::lsp::install::which(p).is_some();
+    if !found("make") && found("mingw32-make") { "mingw32-make".into() } else { "make".into() }
+}
+
+/// The Makefile's own targets (`build`, `debug`, `test`…), in file order; not patterns, special
+/// targets (`.PHONY`) or variable assignments (`X := …`).
+fn make_targets(root: &Path) -> Vec<String> {
+    let Some(text) = ["Makefile", "makefile", "GNUmakefile"].iter().find_map(|m| std::fs::read_to_string(root.join(m)).ok()) else { return vec![] };
+    let mut targets: Vec<String> = vec![];
+    for line in text.lines() {
+        let Some((head, rest)) = line.split_once(':') else { continue };
+        if line.starts_with(['\t', ' ', '#', '.']) || rest.starts_with('=') || head.contains(['=', '%', '$', '(']) {
+            continue;
+        }
+        for name in head.split_whitespace() {
+            if !targets.iter().any(|t| t == name) {
+                targets.push(name.to_string());
+            }
+        }
+    }
+    targets
+}
+
 /// A target whose program is "the newest executable of a folder" that already holds several
 /// (an app and its tests): one entry per executable, so the right one is debugged.
 fn expand_programs(targets: Vec<Target>) -> Vec<Target> {
@@ -64,7 +99,8 @@ fn expand_programs(targets: Vec<Target>) -> Vec<Target> {
             }
             exes.into_iter()
                 .map(|exe| {
-                    let name = exe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    // `windows-gcc-16-debug/app.exe`: the Debug and Release builds tell apart.
+                    let name = exe.strip_prefix(dir).unwrap_or(&exe).display().to_string().replace('\\', "/");
                     Target { label: format!("{} > {name}", t.label), detail: t.detail.clone(), plan: Plan { program: Program::Path(exe.display().to_string()), ..t.plan.clone() } }
                 })
                 .collect()
@@ -269,7 +305,10 @@ mod tests {
     use super::*;
 
     fn project(files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("forge-launch-{}-{}", std::process::id(), files.len()));
+        // One folder per test: they run in parallel.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("forge-launch-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for (path, text) in files {
             let p = dir.join(path);
@@ -277,6 +316,15 @@ mod tests {
             std::fs::write(p, text).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn lists_makefile_targets() {
+        let root = project(&[("Makefile", "MINIFORGE := C:/Bib\nCONDA := \"$(MINIFORGE)/conda.exe\"\n\n.PHONY: build debug\n\nsetup:\n# conan create x\n\t$(CONDA) run conan install .\n\nbuild: setup\n\t$(MAKE) setup\ndebug test:\n\techo\n%.o: %.c\n\tcc\n")]);
+        assert_eq!(make_targets(&root), ["setup", "build", "debug", "test"]);
+        let labels: Vec<_> = targets(&root, None, &[]).into_iter().map(|t| t.label).collect();
+        assert!(labels.contains(&"Make | debug".to_string()), "{labels:?}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -331,7 +379,7 @@ mod tests {
         }
         let mut labels: Vec<_> = targets(&root, None, &[]).into_iter().map(|t| t.label).collect();
         labels.sort();
-        assert_eq!(labels, ["Make > app", "Make > gtest_app"]);
+        assert_eq!(labels, ["Make | all > app", "Make | all > tests/gtest_app"]);
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -14,6 +14,7 @@ pub fn list() -> Vec<PathBuf> {
         .and_then(|s| serde_json::from_str::<Vec<PathBuf>>(&s).ok())
         .unwrap_or_default()
         .into_iter()
+        .map(crate::util::plain_path) // saved by older versions with `\\?\`
         .filter(|p| p.is_dir())
         .collect()
 }

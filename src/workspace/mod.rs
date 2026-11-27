@@ -757,7 +757,7 @@ impl Workspace {
 
     /// Open a file into a pane/zone (moving its tab if it is already open: a file has one tab).
     fn open_path_in(&mut self, path: PathBuf, to: usize, zone: Zone, window: &mut Window, cx: &mut Context<Self>) {
-        let path = path.canonicalize().unwrap_or(path);
+        let path = crate::util::canonical(&path).unwrap_or(path);
         if path.is_dir() {
             return;
         }
@@ -871,7 +871,7 @@ impl Workspace {
     }
 
     pub fn open_file(&mut self, path: PathBuf, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
-        let path = path.canonicalize().unwrap_or(path);
+        let path = crate::util::canonical(&path).unwrap_or(path);
         // Opened for good (double click, search, chat…): a temporary tab of it stays.
         self.keep_transient(&path);
         if self.open_non_text(&path, window, cx) {
@@ -897,7 +897,7 @@ impl Workspace {
     /// file opened this way replaces; editing it or a double click keeps it.
     /// Any kind of file: text, image, PDF, video.
     pub fn open_file_preview(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let path = path.canonicalize().unwrap_or(path);
+        let path = crate::util::canonical(&path).unwrap_or(path);
         if let Some((pane, ix)) = self.locate(|t| t.path(cx).as_ref() == Some(&path)) {
             return self.activate(pane, ix, window, cx);
         }
@@ -1157,6 +1157,7 @@ impl Workspace {
     }
 
     fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let root = crate::util::plain_path(root);
         self.root = root.clone();
         self.configure_project(cx);
         Self::load_project_folder(&root, cx);
@@ -1886,7 +1887,7 @@ fn selection_snippet(b: &Buffer, current_line: bool, cx: &App) -> Option<crate::
 
 /// A file as open editors name it (resolved symlinks), so reviews find their editor.
 fn review_key(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::util::canonical(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn diff_state(patch: &str, mode: DiffMode, cx: &mut App) -> Entity<DiffState> {
