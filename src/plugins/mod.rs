@@ -197,6 +197,11 @@ impl Plugins {
         self.plugins.iter().find_map(|p| p.manifest.database.as_ref().map(|d| (p, d)))
     }
 
+    /// The installed Conan module (its panel lists and adds C/C++ packages), if any.
+    pub fn conan(&self) -> Option<&Plugin> {
+        self.plugins.iter().find(|p| p.dir.join("conan_module.py").is_file())
+    }
+
     /// The installed module bringing an agent, if any.
     pub fn agent(&self) -> Option<(&Plugin, &AgentSpec)> {
         self.plugins.iter().find_map(|p| p.manifest.agent.as_ref().map(|a| (p, a)))

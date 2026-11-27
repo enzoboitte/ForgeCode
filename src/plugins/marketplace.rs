@@ -30,6 +30,15 @@ const BUNDLED: &[(&str, &[(&str, &str, bool)])] = &[(
         ("db.py", include_str!("../../extensions/databases/db.py"), false),
         ("README.md", include_str!("../../extensions/databases/README.md"), false),
     ],
+), (
+    "conan",
+    &[
+        ("plugin.toml", include_str!("../../extensions/conan/plugin.toml"), false),
+        ("conan_module.py", include_str!("../../extensions/conan/conan_module.py"), false),
+        ("conan-forge", include_str!("../../extensions/conan/conan-forge"), true),
+        ("conan-forge.cmd", include_str!("../../extensions/conan/conan-forge.cmd"), false),
+        ("README.md", include_str!("../../extensions/conan/README.md"), false),
+    ],
 )];
 
 /// The marketplace folder: the configured one, or `<config>/marketplace`.
@@ -149,6 +158,36 @@ mod tests {
         assert!(found.errors.is_empty(), "{:?}", found.errors);
         let sonar = &found.plugins.iter().find(|p| p.manifest.name == "SonarQube").unwrap().manifest;
         assert!(sonar.commands.len() >= 5 && sonar.tools.iter().any(|t| t.name == "sonarqube_issues"));
+        // Conan: its launcher is executable, its icons exist, its tools are there.
+        let conan = found.plugins.iter().find(|p| p.manifest.name == "Conan").expect("Conan module");
+        assert!(conan.manifest.tools.iter().any(|t| t.name == "conan_add"));
+        for c in &conan.manifest.commands {
+            if let Some(icon) = &c.icon {
+                assert!(crate::icons::by_name(icon).is_some(), "icon {icon}");
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(std::fs::metadata(market.join("conan/conan-forge")).unwrap().permissions().mode() & 0o111 != 0);
+        }
         std::fs::remove_dir_all(market).unwrap();
+    }
+
+    /// The Conan module's Python: adding a package to conanfile.txt, versions compared as numbers.
+    #[test]
+    fn conan_module_edits_requires() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/conan");
+        let script = "import sys; sys.dont_write_bytecode = True; sys.path.insert(0, sys.argv[1]); import conan_module as c
+t = '[requires]\\nsfml/2.6.1\\n\\n[generators]\\nCMakeDeps\\n'
+r = c.add_requirement(t, 'fmt/10.2.1')
+assert r == '[requires]\\nsfml/2.6.1\\nfmt/10.2.1\\n\\n[generators]\\nCMakeDeps\\n', repr(r)
+assert c.add_requirement(r, 'sfml/3.0.0').startswith('[requires]\\nsfml/3.0.0\\nfmt/10.2.1')
+assert c.add_requirement('[generators]\\nCMakeDeps\\n', 'zlib/1.3').startswith('[requires]\\nzlib/1.3\\n')
+assert c.version_key('1.10.2') > c.version_key('1.9.9')
+assert c.requirements('[requires]\\nsfml/2.6.1 # rendu\\nfmt/10.2.1\\n[generators]\\nX\\n') == ['sfml/2.6.1', 'fmt/10.2.1']
+assert c.requirements(c.remove_requirement(r, 'sfml')) == ['fmt/10.2.1']";
+        let Ok(out) = std::process::Command::new("python3").args(["-c", script]).arg(&dir).output() else { return eprintln!("no python3: skipped") };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     }
 }

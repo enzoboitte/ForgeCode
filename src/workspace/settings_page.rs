@@ -109,7 +109,6 @@ pub fn settings_view(cx: &App) -> SettingsView {
             SettingField::number_input(number(1., 16.), |cx: &App| Settings::get(cx).tab_size as f64, |v, cx: &mut App| Settings::update(cx, |s| s.tab_size = v as usize)),
         ),
         SettingItem::new(t("Soft wrap"), switch_field!(soft_wrap)),
-        SettingItem::new(t("Open files with a double click"), switch_field!(open_on_double_click)),
         SettingItem::new(
             t("Auto save"),
             SettingField::dropdown(

@@ -21,8 +21,6 @@ pub struct Settings {
     pub editor_font_family: String,
     pub tab_size: usize,
     pub soft_wrap: bool,
-    /// Explorer: files open on a double click instead of a single one.
-    pub open_on_double_click: bool,
     pub format_on_save: bool,
     /// Save files this many ms after the last edit; 0 = off. (New name so older "off" settings don't carry over.)
     pub autosave_ms: u64,
@@ -115,7 +113,6 @@ impl Default for Settings {
             editor_font_family: "Menlo".into(),
             tab_size: 4,
             soft_wrap: false,
-            open_on_double_click: false,
             format_on_save: false,
             autosave_ms: 1000,
             copilot_inline: true,

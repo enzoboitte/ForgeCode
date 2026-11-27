@@ -26,9 +26,15 @@ hayro = "0.9"
 image = { version = "0.25", default-features = false }
 similar = "2.7"
 notify = "8"
+# Live shader preview: runs .fs / .frag shaders on the GPU (the version GPUI already uses on Linux).
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "dx12", "vulkan", "glsl", "wgsl"] }
+
+# Windows: icon and version details in forgecode.exe (already in the tree through GPUI).
+[build-dependencies]
+embed-resource = "3"
 
 [dev-dependencies]
-gpui-pre = { version = "=0.3.12", features = ["test-support"] }
+gpui-pre ={ version = "=0.3.12", features = ["test-support"] }
 tree-sitter = "0.26"
 tree-sitter-sequel = "0.3"
 

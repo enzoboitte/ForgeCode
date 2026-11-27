@@ -1,0 +1,64 @@
+name = "Conan"
+version = "1.0.0"
+author = "ForgeCode"
+icon = "package"
+categories = ["C/C++", "Dépendances"]
+description = "Gestionnaire de paquets C/C++ Conan 2 : ajoute des paquets de ConanCenter, les installe et configure CMake (clangd trouve leurs en-têtes). Installe Conan lui-même s'il manque."
+
+[activation]
+workspace_contains = ["conanfile.txt", "conanfile.py", "CMakeLists.txt"]
+
+[[commands]]
+title = "Conan : installer les dépendances"
+run = "conan-forge install"
+icon = "download"
+placement = ["status_bar", "menu"]
+
+[[commands]]
+title = "Conan : configurer CMake avec Conan (Release)"
+run = "conan-forge configure release"
+icon = "hammer"
+
+[[commands]]
+title = "Conan : configurer CMake avec Conan (Debug)"
+run = "conan-forge configure debug"
+
+[[commands]]
+title = "Conan : ajouter le paquet sélectionné"
+run = "conan-forge add"
+icon = "package-plus"
+placement = ["editor", "menu"]
+
+[[commands]]
+title = "Conan : chercher un paquet (texte sélectionné)"
+run = "conan-forge search"
+icon = "package-search"
+
+[[commands]]
+title = "Conan : créer un conanfile.txt"
+run = "conan-forge new"
+
+[[commands]]
+title = "Conan : dépendances obsolètes"
+run = "conan-forge outdated"
+
+[[tools]]
+name = "conan_search"
+description = "Cherche des paquets C/C++ sur ConanCenter. Renvoie les références name/version les plus récentes qui correspondent."
+run = "conan-forge search"
+[tools.parameters]
+query = "Texte à chercher dans le nom du paquet, ex. json ou sfml"
+
+[[tools]]
+name = "conan_add"
+description = "Ajoute un paquet ConanCenter aux dépendances du projet (conanfile.txt, créé s'il manque), à sa dernière version ou à celle donnée. Lancer ensuite conan_install."
+run = "conan-forge add"
+[tools.parameters]
+name = "Nom du paquet (ex. fmt) ou référence complète (ex. fmt/10.2.1)"
+
+[[tools]]
+name = "conan_install"
+description = "Installe les dépendances Conan du projet et configure CMake avec la toolchain Conan (et compile_commands.json pour clangd). Renvoie la sortie de Conan et de CMake."
+run = "conan-forge configure"
+[tools.parameters]
+build_type = "Release (défaut) ou Debug"

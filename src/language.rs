@@ -38,6 +38,8 @@ pub fn detect(path: &Path, plugins: &Plugins) -> LanguageInfo {
         "rs" => info("rust", "rust", &["rust-analyzer"], Some("cargo run")),
         "c" => info("c", "c", &CLANGD, Some("cc ${includes} \"${file}\" -o \"${out}\" && \"${out}\"")),
         "h" => info("c", "c", &CLANGD, None),
+        // Shaders (raylib's .fs / .vs, OpenGL's .frag / .vert…).
+        "fs" | "vs" | "frag" | "vert" | "glsl" | "geom" | "comp" | "tesc" | "tese" => info("glsl", "glsl", &["glsl_analyzer"], None),
         "cpp" | "cc" | "cxx" | "c++" => info(
             "cpp",
             "cpp",
@@ -373,7 +375,25 @@ pub fn fix_c_family_highlighting() {
         cmake.highlights = CMAKE_HIGHLIGHTS.into();
         registry.register("cmake", &cmake);
     }
+    // GLSL reads as C to the C grammar; its own words are colored on top (first, so they win).
+    if let Some(mut glsl) = registry.language("c") {
+        glsl.name = "glsl".into();
+        glsl.highlights = format!("{GLSL_HIGHLIGHTS}{}", glsl.highlights).into();
+        registry.register("glsl", &glsl);
+    }
 }
+
+/// GLSL on top of the C query: qualifiers, vector / matrix / sampler types, `gl_*` and built-in
+/// functions. They parse as plain identifiers or type names in C, hence the name patterns.
+const GLSL_HIGHLIGHTS: &str = r#"
+([(type_identifier) (identifier)] @keyword
+  (#match? @keyword "^(uniform|in|out|inout|varying|attribute|layout|precision|highp|mediump|lowp|flat|smooth|noperspective|centroid|invariant|buffer|shared|coherent|readonly|writeonly|discard)$"))
+([(type_identifier) (identifier) (primitive_type)] @type.builtin
+  (#match? @type.builtin "^([biud]?vec[234]|d?mat[234](x[234])?|[iu]?sampler(1D|2D|3D|Cube|2DRect|1DArray|2DArray|CubeArray|Buffer|2DMS)(Shadow)?|[iu]?image[123]D|bool|float|double|int|uint|void)$"))
+((identifier) @variable.builtin (#match? @variable.builtin "^gl_"))
+(call_expression function: (identifier) @function.builtin
+  (#match? @function.builtin "^(texture|texture2D|textureLod|texelFetch|textureSize|mix|clamp|smoothstep|step|min|max|abs|sign|floor|ceil|fract|mod|pow|exp|exp2|log|log2|sqrt|inversesqrt|sin|cos|tan|asin|acos|atan|radians|degrees|length|distance|dot|cross|normalize|reflect|refract|faceforward|transpose|inverse|determinant|dFdx|dFdy|fwidth|any|all|not|lessThan|greaterThan|equal|notEqual)$"))
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -427,6 +447,10 @@ mod tests {
             &[("import", "#C586C0"), ("const", "#569CD6"), ("'b'", "#CE9178"), ("number", "#569CD6"), ("K", "#4EC9B0"), ("2", "#B5CEA8")]);
         check("rust", "fn main() { let s: String = f(); if s.is_empty() { return; } }\n",
             &[("fn", "#569CD6"), ("main", "#DCDCAA"), ("String", "#4EC9B0"), ("if", "#C586C0"), ("return", "#C586C0")]);
+        // A raylib fragment shader.
+        check("glsl", "#version 330\nout vec4 finalColor;\nuniform float uTime; // s\nvoid main() {\n    vec2 p = gl_FragCoord.xy;\n    finalColor = vec4(mix(0.2, 1.0, uTime));\n    if (p.x > 1.0) discard;\n}\n",
+            &[("#version", "#C586C0"), ("out", "#569CD6"), ("vec4", "#569CD6"), ("uniform", "#569CD6"), ("float", "#569CD6"), ("// s", "#6A9955"), ("gl_FragCoord", "#569CD6"), ("mix", "#DCDCAA"), ("0.2", "#B5CEA8"), ("discard", "#569CD6"), ("if (", "#C586C0")]);
+        assert_eq!(detect(Path::new("assets/shaders/outline.fs"), &Plugins::default()).highlight, "glsl");
     }
 
     #[test]

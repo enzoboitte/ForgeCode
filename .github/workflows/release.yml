@@ -1,9 +1,11 @@
-# Builds ForgeCode on macOS, Linux and Windows. A tag `v*` (e.g. `git tag v0.1.0 && git push --tags`)
-# also publishes the files on the repository's Releases page; "Run workflow" only builds them.
+# Builds ForgeCode on macOS, Linux and Windows at every push to main (the packages are kept as the
+# run's artifacts). A tag `v*` (e.g. `git tag v0.1.0 && git push --tags`) also publishes them on the
+# repository's Releases page.
 name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 

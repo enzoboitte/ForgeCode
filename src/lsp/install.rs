@@ -164,6 +164,17 @@ fn install(program: &str) -> Result<()> {
         "jdtls" => jdtls(),
         "kotlin-lsp" => kotlin_lsp(),
         "csharp-ls" => csharp_ls(),
+        "glsl_analyzer" => {
+            let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+                ("macos", "aarch64") => "aarch64-macos.zip",
+                ("macos", _) => "x86_64-macos.zip",
+                ("windows", "aarch64") => "aarch64-windows.zip",
+                ("windows", _) => "x86_64-windows.zip",
+                (_, "aarch64") => "aarch64-linux-musl.zip",
+                _ => "x86_64-linux-musl.zip",
+            };
+            binary_from_archive(&format!("https://github.com/nolanderc/glsl_analyzer/releases/latest/download/{asset}"), asset, "glsl_analyzer")
+        }
         // Go's own installer, into ForgeCode's tools.
         "gopls" => {
             let go = which("go").context("Go is not installed (https://go.dev/dl)")?;
@@ -180,7 +191,37 @@ fn install(program: &str) -> Result<()> {
 
 /// Whether ForgeCode installs `program` by itself when it is missing.
 pub fn can_install(program: &str) -> bool {
-    matches!(program, "clangd" | "gopls" | "rust-analyzer" | "jdtls" | "kotlin-lsp" | "csharp-ls") || npm_packages(program).is_some()
+    matches!(program, "clangd" | "gopls" | "rust-analyzer" | "jdtls" | "kotlin-lsp" | "csharp-ls" | "glsl_analyzer") || npm_packages(program).is_some()
+}
+
+/// One program out of a release archive, into the tools' `bin`.
+fn binary_from_archive(url: &str, archive: &str, program: &str) -> Result<()> {
+    let tmp = tools_dir().join(format!(".unpack-{program}"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    unpack_into(&download(url)?, archive, &tmp)?;
+    let exe = format!("{program}{}", std::env::consts::EXE_SUFFIX);
+    let found = find_file(&tmp, &exe, 3).with_context(|| format!("{exe} not found in {archive}"))?;
+    write_executable(&tools_dir().join("bin").join(&exe), &std::fs::read(found)?)?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(())
+}
+
+/// Khronos' reference GLSL compiler (the shader linter): installed, else its latest build.
+pub fn ensure_glslang() -> Result<PathBuf> {
+    if let Some(p) = which("glslang").or_else(|| which("glslangValidator")) {
+        return Ok(p);
+    }
+    let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", _) => "glslang-main-macos-universal-release.zip",
+        ("windows", "aarch64") => "glslang-main-windows-aarch64-release.zip",
+        ("windows", _) => "glslang-main-windows-x86_64-release.zip",
+        ("linux", "x86_64") => "glslang-main-linux-x86_64-release.zip",
+        (os, arch) => bail!("no glslang build for {os}/{arch}"),
+    };
+    std::fs::create_dir_all(tools_dir())?;
+    binary_from_archive(&format!("https://github.com/KhronosGroup/glslang/releases/download/main-tot/{asset}"), asset, "glslang")?;
+    which("glslang").context("glslang not found after installing it")
 }
 
 /// How the user installs a server ForgeCode can't install itself.

@@ -21,6 +21,8 @@ use crate::icons;
 
 pub enum FileTreeEvent {
     Open(PathBuf),
+    /// One click: open in a temporary tab.
+    Preview(PathBuf),
     Delete(PathBuf),
     OpenInTerminal(PathBuf),
     /// A file or folder was created inline.
@@ -426,13 +428,12 @@ impl Render for FileTree {
                                         let _ = down.update(cx, |t, _| t.press = Some((pressed.clone(), e.position)));
                                     })
                                     .on_mouse_up(MouseButton::Left, move |e, _, cx| {
+                                        // Like VS Code: one click opens a temporary tab, a double click keeps it.
                                         let _ = up.update(cx, |t, cx| {
-                                            let double = crate::settings::Settings::get(cx).open_on_double_click;
                                             if let Some((p, at)) = t.press.take()
                                                 && (e.position - at).magnitude() < 12.
-                                                && (!double || e.click_count >= 2)
                                             {
-                                                cx.emit(FileTreeEvent::Open(p));
+                                                cx.emit(if e.click_count >= 2 { FileTreeEvent::Open(p) } else { FileTreeEvent::Preview(p) });
                                             }
                                         });
                                     })

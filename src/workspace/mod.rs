@@ -20,6 +20,10 @@ mod watcher;
 pub mod runtime_picker;
 mod code_actions;
 mod csv_table;
+mod glsl_lint;
+mod conan_panel;
+pub mod shader;
+mod shader_view;
 mod marketplace;
 mod modules;
 mod sql;
@@ -121,6 +125,7 @@ enum Sidebar {
     Search,
     Git,
     Databases,
+    Conan,
 }
 
 /// The workspace, reachable from editor callbacks that only get `&mut App`.
@@ -156,7 +161,7 @@ enum Tab {
     Graph(Entity<GitGraph>),
     Agents(Entity<crate::ai::agents_view::AgentTree>),
     /// Image viewer; `zoom` 1 fits the pane, more scrolls.
-    Image { path: PathBuf, zoom: f32, scroll: ScrollHandle },
+    Image { path: PathBuf, zoom: f32, scroll: ScrollHandle, crisp: Option<Arc<gpui_kit::Image>> },
     Pdf(Entity<viewer::PdfView>),
     Video(Entity<video::VideoView>),
     /// A database table (databases module).
@@ -181,16 +186,48 @@ impl Tab {
             Tab::Settings => t("Settings").into(),
         }
     }
+
+    /// The file a tab shows (text, image, PDF, video), if any.
+    fn path(&self, cx: &App) -> Option<PathBuf> {
+        match self {
+            Tab::File(b) => Some(b.path.clone()),
+            Tab::Image { path, .. } => Some(path.clone()),
+            Tab::Pdf(v) => Some(v.read(cx).path.clone()),
+            Tab::Video(v) => Some(v.read(cx).path.clone()),
+            _ => None,
+        }
+    }
 }
 
 fn is_pdf(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
+/// Small images (pixel art, icons) with crisp pixels: GPUI smooths what it enlarges, so they are
+/// enlarged here first, each pixel repeated. None for big, vector or animated images.
+fn crisp_image(path: &Path) -> Option<Arc<gpui_kit::Image>> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if matches!(ext.as_str(), "svg" | "gif") {
+        return None;
+    }
+    // The header alone says the size: big images are not decoded here.
+    let (w, h) = image::image_dimensions(path).ok()?;
+    let side = w.max(h);
+    if side == 0 || side > 512 {
+        return None;
+    }
+    // About 2048 px on the long side, enough for a full-screen pane: GPUI then only shrinks it.
+    let factor = (2048 / side).max(2);
+    let big = image::open(path).ok()?.resize_exact(w * factor, h * factor, image::imageops::FilterType::Nearest);
+    let mut png = Vec::new();
+    big.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+    Some(Arc::new(gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png)))
+}
+
 /// A viewer tab for images, PDFs and videos, `None` for files the editor opens.
 fn viewer_tab(path: &Path, window: &mut Window, cx: &mut App) -> Option<Tab> {
     if crate::util::is_viewable_image(path) {
-        Some(Tab::Image { path: path.to_path_buf(), zoom: 1., scroll: ScrollHandle::new() })
+        Some(Tab::Image { path: path.to_path_buf(), zoom: 1., scroll: ScrollHandle::new(), crisp: crisp_image(path) })
     } else if is_pdf(path) {
         Some(Tab::Pdf(cx.new(|_| viewer::PdfView::new(path.to_path_buf()))))
     } else if video::is_video(path) {
@@ -209,11 +246,36 @@ fn viewer_shows(tab: &Tab, path: &Path, cx: &App) -> bool {
     }
 }
 
+/// What the "…" menu of a tab strip closes.
+#[derive(Clone, Copy, PartialEq)]
+pub enum CloseTabs {
+    /// Only tabs with nothing unsaved.
+    Saved,
+    /// Everything (unsaved edits are asked about first, unless autosave keeps them).
+    All,
+    SaveAndCloseAll,
+    /// Everything, once the user agreed to lose unsaved edits.
+    AllConfirmed,
+}
+
 /// An editor group: tabs shown together in one split.
 struct Pane {
     id: usize,
     tabs: Vec<Tab>,
     active: Option<usize>,
+    /// The file of the temporary tab (one click in the explorer, like VS Code's preview): the
+    /// next file opened that way takes its place, until it is edited or double-clicked.
+    transient: Option<PathBuf>,
+}
+
+impl Pane {
+    fn new(id: usize) -> Self {
+        Self { id, tabs: vec![], active: None, transient: None }
+    }
+
+    fn is_transient(&self, tab: &Tab, cx: &App) -> bool {
+        self.transient.is_some() && tab.path(cx) == self.transient
+    }
 }
 
 enum LspSlot {
@@ -252,6 +314,8 @@ pub struct Workspace {
     /// Databases module: connections and engine, and its sidebar.
     db_hub: Entity<databases::DbHub>,
     db_panel: Entity<databases::panel::DbPanel>,
+    /// Conan module's panel: dependencies, remotes, available packages.
+    conan_panel: Entity<conan_panel::ConanPanel>,
     /// Watches the project folder for changes made outside ForgeCode.
     watcher: Option<watcher::ProjectWatcher>,
     /// Setup advice already shown in this project (see [`advisor`]).
@@ -261,7 +325,14 @@ pub struct Workspace {
     /// How many times each server was restarted after stopping by itself.
     server_restarts: HashMap<String, u32>,
     lsp_events: smol::channel::Sender<LspEvent>,
+    /// What the Problems view and editors show: the language server's and the linters'.
     diagnostics: BTreeMap<PathBuf, Vec<Diagnostic>>,
+    lsp_diagnostics: BTreeMap<PathBuf, Vec<Diagnostic>>,
+    lint_diagnostics: BTreeMap<PathBuf, Vec<Diagnostic>>,
+    /// Pending shader lint per file (waits for typing to pause).
+    lints: HashMap<PathBuf, Task<()>>,
+    /// Live previews of the shaders shown with one.
+    shader_previews: HashMap<PathBuf, Entity<shader_view::ShaderPreview>>,
     breakpoints: Breakpoints,
     /// Pending autosave timer per file (a timer costs nothing while it waits).
     autosave: HashMap<PathBuf, Task<()>>,
@@ -290,8 +361,23 @@ impl Workspace {
         let hermes = cx.new(|cx| crate::ai::hermes_panel::HermesPanel::new(root.clone(), window, cx));
         let db_hub = cx.new(|_| databases::DbHub::new(root.clone()));
         let db_panel = cx.new(|cx| databases::panel::DbPanel::new(db_hub.clone(), cx));
+        let conan_panel = cx.new(|cx| conan_panel::ConanPanel::new(root.clone(), window, cx));
 
         let subs = vec![
+            cx.subscribe_in(&conan_panel, window, |this, _, event: &conan_panel::ConanEvent, window, cx| match event {
+                // Installing and configuring CMake take a while: in the Output panel, as it goes.
+                conan_panel::ConanEvent::Run(title, args) => {
+                    let Some((python, script)) = conan_panel::script(cx) else { return };
+                    let quoted: Vec<String> = args.iter().map(|a| format!("\"{a}\"")).collect();
+                    let line = format!("\"{}\" \"{}\" {}", python.display(), script.display(), quoted.join(" "));
+                    let mut env = this.command_env(cx);
+                    env.push(("FORGE_WORKSPACE".into(), this.root.display().to_string()));
+                    let root = this.root.clone();
+                    this.output.update(cx, |o, cx| o.run(title, &line, &root, env, cx));
+                    this.show_bottom_tab(BottomTab::Output, window, cx);
+                }
+                conan_panel::ConanEvent::Open(path) => this.open_file(path.clone(), None, window, cx),
+            }),
             cx.subscribe_in(&file_tree, window, Self::on_file_tree_event),
             cx.subscribe_in(&git, window, Self::on_git_event),
             // A GitHub Actions run's log goes to the Output tab.
@@ -477,7 +563,7 @@ impl Workspace {
             file_tree,
             search,
             git,
-            panes: vec![Pane { id: 0, tabs: vec![], active: None }],
+            panes: vec![Pane::new(0)],
             layout: Layout::Pane(0),
             focused: 0,
             next_pane: 1,
@@ -493,12 +579,17 @@ impl Workspace {
             hermes,
             db_hub,
             db_panel,
+            conan_panel,
             advised: Default::default(),
             watcher: None,
             servers: HashMap::new(),
             server_restarts: HashMap::new(),
             lsp_events,
             diagnostics: BTreeMap::new(),
+            lsp_diagnostics: BTreeMap::new(),
+            lint_diagnostics: BTreeMap::new(),
+            lints: HashMap::new(),
+            shader_previews: HashMap::new(),
             breakpoints: Breakpoints::new(),
             autosave: HashMap::new(),
             focus: cx.focus_handle(),
@@ -597,6 +688,9 @@ impl Workspace {
         // With autosave on, closing keeps the edits; with it off they are dropped (no prompt).
         let autosave = Settings::get(cx).autosave_ms > 0;
         let Some(p) = self.pane_mut(pane).filter(|p| ix < p.tabs.len()) else { return };
+        if p.is_transient(&p.tabs[ix], cx) {
+            p.transient = None;
+        }
         if let Tab::File(mut b) = p.tabs.remove(ix) {
             if autosave && b.dirty {
                 let _ = b.save(cx);
@@ -636,7 +730,7 @@ impl Workspace {
         }
         let id = self.next_pane;
         self.next_pane += 1;
-        self.panes.push(Pane { id, tabs: vec![], active: None });
+        self.panes.push(Pane::new(id));
         self.layout.split(target, id, zone);
         id
     }
@@ -712,8 +806,14 @@ impl Workspace {
         }
         let sub = cx.subscribe_in(&buffer.editor, window, {
             let path = path.clone();
-            move |this, _, event: &InputEvent, _, cx| match event {
-                InputEvent::Change => this.on_buffer_changed(&path, cx),
+            move |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.on_buffer_changed(&path, cx);
+                    // A shader's preview redraws as it is typed.
+                    if this.shader_previews.contains_key(&path) {
+                        this.refresh_shader_preview(&path, window, cx);
+                    }
+                }
                 // Leaving the editor with a selection: offer it to the chat (the editor hides it while unfocused).
                 InputEvent::Blur => {
                     let snippet = this.buffers().find(|b| b.path == path).and_then(|b| selection_snippet(b, false, cx));
@@ -769,6 +869,8 @@ impl Workspace {
 
     pub fn open_file(&mut self, path: PathBuf, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
         let path = path.canonicalize().unwrap_or(path);
+        // Opened for good (double click, search, chat…): a temporary tab of it stays.
+        self.keep_transient(&path);
         if self.open_non_text(&path, window, cx) {
             return;
         }
@@ -780,6 +882,7 @@ impl Workspace {
                 self.open_tab(Tab::File(buffer), window, cx);
                 self.run_triggered(Some(&lsp_id), |c| c.on_open, window, cx);
                 self.advise(&lsp_id, window, cx);
+                self.lint_soon(&path, cx);
             }
         }
         if let (Some(line), Some(b)) = (line, self.active_buffer()) {
@@ -787,11 +890,85 @@ impl Workspace {
         }
     }
 
+    /// One click in the explorer, like VS Code: a temporary tab (title in italics) that the next
+    /// file opened this way replaces; editing it or a double click keeps it.
+    /// Any kind of file: text, image, PDF, video.
+    pub fn open_file_preview(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let path = path.canonicalize().unwrap_or(path);
+        if let Some((pane, ix)) = self.locate(|t| t.path(cx).as_ref() == Some(&path)) {
+            return self.activate(pane, ix, window, cx);
+        }
+        let pane = self.focused;
+        // The current temporary tab goes, unless it holds unsaved edits.
+        let replaced = self.pane(pane).and_then(|p| p.tabs.iter().position(|t| p.is_transient(t, cx) && !matches!(t, Tab::File(b) if b.dirty)));
+        if let Some(ix) = replaced {
+            self.close_tab(pane, ix, window, cx);
+        }
+        let pane = self.focused;
+        let before = self.pane(pane).map_or(0, |p| p.tabs.len());
+        self.open_file(path.clone(), None, window, cx);
+        // A tab was added (files opened by another app add none): it is the temporary one,
+        // in the place of the one it replaced.
+        let Some(p) = self.pane_mut(pane).filter(|p| p.tabs.len() == before + 1) else { return };
+        p.transient = Some(path);
+        if let Some(ix) = replaced.filter(|ix| *ix < p.tabs.len()) {
+            let tab = p.tabs.pop().unwrap();
+            p.tabs.insert(ix, tab);
+            self.activate(pane, ix, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// `path` is kept open: no longer a temporary tab anywhere.
+    fn keep_transient(&mut self, path: &Path) {
+        for p in &mut self.panes {
+            if p.transient.as_deref() == Some(path) {
+                p.transient = None;
+            }
+        }
+    }
+
+    /// Keep a temporary tab (double click on it).
+    fn pin_tab(&mut self, pane: usize, ix: usize, cx: &mut Context<Self>) {
+        if let Some(path) = self.pane(pane).and_then(|p| p.tabs.get(ix)).and_then(|t| t.path(cx)) {
+            self.keep_transient(&path);
+            cx.notify();
+        }
+    }
+
+    /// The "…" menu of a tab strip: close what is saved, everything, or save then close.
+    pub fn close_tabs(&mut self, pane: usize, how: CloseTabs, window: &mut Window, cx: &mut Context<Self>) {
+        if how == CloseTabs::SaveAndCloseAll {
+            self.save_all(cx);
+        }
+        let Some(p) = self.pane(pane) else { return };
+        // Without autosave, closing drops unsaved edits: ask first.
+        let unsaved = p.tabs.iter().filter(|t| matches!(t, Tab::File(b) if b.dirty)).count();
+        if how == CloseTabs::All && unsaved > 0 && Settings::get(cx).autosave_ms == 0 {
+            let ws = cx.entity().downgrade();
+            let title = format!("{unsaved} {}", t(if unsaved == 1 { "unsaved file" } else { "unsaved files" }));
+            return dialogs::confirm(title, t("Their changes will be lost."), t("Close all"), window, cx, move |w, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.close_tabs(pane, CloseTabs::AllConfirmed, w, cx));
+            });
+        }
+        // From the last, so indices stay valid while closing.
+        let doomed: Vec<usize> = (0..p.tabs.len())
+            .rev()
+            .filter(|&ix| how != CloseTabs::Saved || !matches!(&p.tabs[ix], Tab::File(b) if b.dirty))
+            .collect();
+        for ix in doomed {
+            self.close_tab(pane, ix, window, cx);
+        }
+    }
+
     fn on_buffer_changed(&mut self, path: &Path, cx: &mut Context<Self>) {
+        // Edited: a temporary tab is kept from now on.
+        let was_transient = self.panes.iter().any(|p| p.transient.as_deref() == Some(path));
+        self.keep_transient(path);
         let Some(b) = self.buffers_mut().find(|b| b.path == path) else { return };
         let had_conflicts = !b.conflicts.is_empty();
         b.refresh_conflicts(cx);
-        let repaint = !b.dirty || b.preview != Preview::Off || had_conflicts != !b.conflicts.is_empty();
+        let repaint = !b.dirty || was_transient || b.preview != Preview::Off || had_conflicts != !b.conflicts.is_empty();
         b.dirty = true;
         if let Some(lsp) = &b.lsp {
             lsp.sync(&b.path, &b.editor.read(cx).value());
@@ -799,6 +976,7 @@ impl Workspace {
         if repaint {
             cx.notify();
         }
+        self.lint_soon(path, cx);
         let delay = Settings::get(cx).autosave_ms;
         if delay > 0 {
             let path = path.to_path_buf();
@@ -994,9 +1172,13 @@ impl Workspace {
         }
         self.terminals.clear();
         self.diagnostics.clear();
+        self.lsp_diagnostics.clear();
+        self.lint_diagnostics.clear();
         self.file_tree.update(cx, |t, cx| t.set_root(root.clone(), cx));
         self.search.update(cx, |s, cx| s.set_root(root.clone(), cx));
         self.git.update(cx, |g, cx| g.set_workspace(root.clone(), cx));
+        let conan_open = self.sidebar == Some(Sidebar::Conan);
+        self.conan_panel.update(cx, |c, cx| if conan_open { c.set_root(root.clone(), cx) } else { c.root = root.clone() });
         self.advised.clear();
         self.db_hub.update(cx, |h, cx| h.set_root(root.clone(), cx));
         // Watch the new folder (needs the window: done on the next frame).
@@ -1043,6 +1225,7 @@ impl Workspace {
         let ws = cx.entity().downgrade();
         match event {
             FileTreeEvent::Open(path) => self.open_file(path.clone(), None, window, cx),
+            FileTreeEvent::Preview(path) => self.open_file_preview(path.clone(), window, cx),
             FileTreeEvent::Created(path) => {
                 self.git.update(cx, |g, cx| g.refresh(cx));
                 if path.is_file() {
@@ -1154,7 +1337,59 @@ impl Workspace {
         })
     }
 
+    /// The language server's diagnostics for `path`.
     fn set_diagnostics(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>, cx: &mut Context<Self>) {
+        Self::store(&mut self.lsp_diagnostics, &path, diagnostics);
+        self.publish_diagnostics(path, cx);
+    }
+
+    /// A linter's diagnostics for `path` (they don't replace the language server's).
+    fn set_lint(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>, cx: &mut Context<Self>) {
+        Self::store(&mut self.lint_diagnostics, &path, diagnostics);
+        self.publish_diagnostics(path, cx);
+    }
+
+    fn store(map: &mut BTreeMap<PathBuf, Vec<Diagnostic>>, path: &Path, diagnostics: Vec<Diagnostic>) {
+        if diagnostics.is_empty() {
+            map.remove(path);
+        } else {
+            map.insert(path.to_path_buf(), diagnostics);
+        }
+    }
+
+    /// The live preview of the shader `path` follows its editor; created when first shown,
+    /// dropped when the preview is closed.
+    pub fn refresh_shader_preview(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(b) = self.buffers().find(|b| b.path == path && b.lang.highlight == "glsl") else { return };
+        if b.preview == Preview::Off {
+            self.shader_previews.remove(path);
+            return;
+        }
+        let text = b.text(cx);
+        let preview = self.shader_previews.entry(path.to_path_buf()).or_insert_with(|| cx.new(|_| shader_view::ShaderPreview::new())).clone();
+        preview.update(cx, |p, cx| p.set_source(text, window, cx));
+    }
+
+    /// Check a shader once typing pauses, with the text in the editor (saved or not).
+    fn lint_soon(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(b) = self.buffers().find(|b| b.path == path && b.lang.highlight == "glsl") else { return };
+        let (path, text) = (path.to_path_buf(), b.text(cx));
+        let task = cx.spawn({
+            let path = path.clone();
+            async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                let checked = path.clone();
+                // No linter (offline, unknown platform): the shader just isn't checked.
+                let Ok(diagnostics) = cx.background_spawn(async move { glsl_lint::lint(&checked, &text) }).await else { return };
+                let _ = this.update(cx, |this, cx| this.set_lint(path, diagnostics, cx));
+            }
+        });
+        self.lints.insert(path, task);
+    }
+
+    /// Show the server's and the linters' diagnostics together.
+    fn publish_diagnostics(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let diagnostics: Vec<Diagnostic> = [&self.lsp_diagnostics, &self.lint_diagnostics].iter().filter_map(|m| m.get(&path)).flatten().cloned().collect();
         if let Some(b) = self.buffers().find(|b| b.path == path) {
             b.set_diagnostics(&diagnostics, cx);
         }
@@ -1708,17 +1943,85 @@ mod ui_tests {
         cx.simulate_mouse_move(file.center() + point(gpui_kit::px(4.), gpui_kit::px(1.)), MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(file.center() + point(gpui_kit::px(4.), gpui_kit::px(1.)), MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
-        ws.read_with(cx, |w, _| assert_eq!(w.panes[0].tabs.len(), 1, "opened with one click"));
-        // With the setting, one click selects and a double click opens.
-        cx.update(|_, cx| crate::settings::Settings::update(cx, |s| s.open_on_double_click = true));
+        let tabs = |cx: &mut gpui_kit::VisualTestContext| ws.read_with(cx, |w, cx| w.panes[0].tabs.iter().map(|t| (t.label(cx), w.panes[0].is_transient(t, cx))).collect::<Vec<_>>());
+        assert_eq!(tabs(cx), [("b.txt".into(), true)], "one click: a temporary tab");
+        // Another file with one click takes its place, like VS Code's preview.
         let other = cx.debug_bounds("tree-a.txt").expect("row").center();
         cx.simulate_click(other, Modifiers::none());
         cx.run_until_parked();
-        ws.read_with(cx, |w, _| assert_eq!(w.panes[0].tabs.len(), 1, "one click no longer opens"));
+        assert_eq!(tabs(cx), [("a.txt".into(), true)], "the temporary tab is replaced");
+        // A double click keeps it: the next one-click file opens beside it.
         cx.simulate_event(gpui_kit::MouseDownEvent { position: other, button: MouseButton::Left, modifiers: Modifiers::none(), click_count: 2, first_mouse: false });
         cx.simulate_event(gpui_kit::MouseUpEvent { position: other, button: MouseButton::Left, modifiers: Modifiers::none(), click_count: 2 });
         cx.run_until_parked();
-        ws.read_with(cx, |w, _| assert_eq!(w.panes[0].tabs.len(), 2, "a double click opens"));
+        assert_eq!(tabs(cx), [("a.txt".into(), false)], "a double click keeps it");
+        // What a single click does (simulated clicks are timing-sensitive when the machine is busy).
+        let root = ws.read_with(cx, |w, _| w.root.clone());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_file_preview(root.join("b.txt"), window, cx)));
+        cx.run_until_parked();
+        assert_eq!(tabs(cx), [("a.txt".into(), false), ("b.txt".into(), true)]);
+        // Editing keeps a temporary tab too.
+        cx.simulate_input("x");
+        cx.run_until_parked();
+        assert_eq!(tabs(cx), [("a.txt".into(), false), ("b.txt".into(), false)], "edited: kept");
+
+        // Every kind of file: an image, then a PDF, take the temporary tab in turn.
+        let root = ws.read_with(cx, |w, _| w.root.clone());
+        std::fs::write(root.join("c.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(root.join("d.pdf"), b"%PDF-1.4\n").unwrap();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_file_preview(root.join("c.png"), window, cx)));
+        cx.run_until_parked();
+        assert_eq!(tabs(cx)[2], ("c.png".into(), true), "an image opens as a temporary tab");
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_file_preview(root.join("d.pdf"), window, cx)));
+        cx.run_until_parked();
+        assert_eq!(tabs(cx).len(), 3);
+        assert_eq!(tabs(cx)[2], ("d.pdf".into(), true), "the PDF takes the image's place");
+        // Opened for good (as a double click does): it stays.
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_file(root.join("d.pdf"), None, window, cx)));
+        assert_eq!(tabs(cx)[2], ("d.pdf".into(), false));
+    }
+
+    /// A small image is enlarged pixel by pixel: no blended color where two pixels meet.
+    #[test]
+    fn small_images_keep_sharp_pixels() {
+        let dir = std::env::temp_dir().join(format!("forge-crisp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pixels.png");
+        let mut tiny = image::RgbaImage::new(2, 1);
+        tiny.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        tiny.put_pixel(1, 0, image::Rgba([0, 0, 255, 255]));
+        tiny.save(&path).unwrap();
+        let crisp = super::crisp_image(&path).expect("a small image is enlarged");
+        let big = image::load_from_memory(crisp.bytes()).unwrap().to_rgba8();
+        assert_eq!(big.dimensions(), (2048, 1024));
+        assert_eq!(big.get_pixel(1023, 500).0, [255, 0, 0, 255], "last red column");
+        assert_eq!(big.get_pixel(1024, 500).0, [0, 0, 255, 255], "first blue column, nothing in between");
+        // A big image is left to GPUI as it is.
+        image::RgbaImage::new(1000, 10).save(&path).unwrap();
+        assert!(super::crisp_image(&path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The tab strip's "…": close the saved tabs, or save everything and close.
+    #[gpui_kit::test]
+    fn tab_menu_closes_saved_tabs_or_saves_and_closes_all(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        let root = ws.read_with(cx, |w, _| w.root.clone());
+        cx.update(|_, cx| crate::settings::Settings::update(cx, |s| s.autosave_ms = 0));
+        for f in ["a.txt", "b.txt"] {
+            cx.update(|window, cx| ws.update(cx, |w, cx| w.open_file(root.join(f), None, window, cx)));
+        }
+        cx.run_until_parked();
+        cx.simulate_input("edit ");
+        cx.run_until_parked();
+        let labels = |cx: &mut gpui_kit::VisualTestContext| ws.read_with(cx, |w, cx| w.panes[0].tabs.iter().map(|t| t.label(cx)).collect::<Vec<String>>());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.close_tabs(0, super::CloseTabs::Saved, window, cx)));
+        cx.run_until_parked();
+        assert_eq!(labels(cx), ["b.txt"], "the unsaved one stays");
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.close_tabs(0, super::CloseTabs::SaveAndCloseAll, window, cx)));
+        cx.run_until_parked();
+        assert!(ws.read_with(cx, |w, _| w.panes[0].tabs.is_empty()));
+        assert!(std::fs::read_to_string(root.join("b.txt")).unwrap().starts_with("edit "), "saved before closing");
     }
 
     #[gpui_kit::test]

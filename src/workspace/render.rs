@@ -76,6 +76,11 @@ impl Workspace {
                 el.child(item("act-db", IconName::Database, "Databases", self.sidebar == Some(Sidebar::Databases))
                     .on_click(cx.listener(|t, _, _, cx| t.toggle_sidebar(Sidebar::Databases, cx))))
             })
+            // Conan module: just under Databases.
+            .when(crate::plugins::Plugins::global(cx).conan().is_some(), |el| {
+                el.child(item("act-conan", IconName::Package, "Conan packages", self.sidebar == Some(Sidebar::Conan))
+                    .on_click(cx.listener(|t, _, _, cx| t.toggle_sidebar(Sidebar::Conan, cx))))
+            })
             .child(div().flex_1())
             .child(Button::new("act-account").ghost().size(px(34.)).child(avatar).tooltip(t("Accounts")).dropdown_menu_with_anchor(Anchor::BottomLeft, |mut menu, _, cx| {
                 let state = cx.global::<CopilotState>();
@@ -106,6 +111,10 @@ impl Workspace {
         self.sidebar = if self.sidebar == Some(which) { None } else { Some(which) };
         if which == Sidebar::Git {
             self.git.update(cx, |g, cx| g.refresh(cx));
+        }
+        // Read when shown: listing the remotes' packages runs Conan.
+        if which == Sidebar::Conan && self.sidebar == Some(Sidebar::Conan) {
+            self.conan_panel.update(cx, |c, cx| c.refresh(false, cx));
         }
         cx.notify();
     }
@@ -189,6 +198,7 @@ impl Workspace {
             Tab::Settings => (IconName::Settings, muted, false),
         };
         let label = tab.label(cx);
+        let transient = self.pane(pane).is_some_and(|p| p.is_transient(tab, cx));
         let group = SharedString::from(format!("tab-{pane}-{ix}"));
         let drag = DraggedTab { pane, ix, label: label.clone().into(), path: match tab { Tab::File(b) => Some(b.path.clone()), _ => None } };
         let focused_pane = pane == self.focused;
@@ -208,11 +218,18 @@ impl Workspace {
             .when(active, |el| el.bg(theme.background).text_color(theme.foreground))
             .when(!active, |el| el.text_color(theme.muted_foreground).hover(|s| s.bg(theme.secondary)))
             .when(active && focused_pane, |el| el.child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(theme.primary)))
-            .on_click(cx.listener(move |t, _, w, cx| t.activate(pane, ix, w, cx)))
+            .on_click(cx.listener(move |t, e: &ClickEvent, w, cx| {
+                // A double click keeps a temporary tab, as in VS Code.
+                if e.click_count() >= 2 {
+                    t.pin_tab(pane, ix, cx);
+                }
+                t.activate(pane, ix, w, cx)
+            }))
             .on_mouse_down(MouseButton::Middle, cx.listener(move |t, _, w, cx| t.close_tab(pane, ix, w, cx)))
             .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
             .child(div().text_color(tint).child(icon))
-            .child(label)
+            // Temporary tab: its title in italics.
+            .child(div().when(transient, |el| el.italic()).child(label))
             .child(
                 // One slot: the unsaved dot, swapped for the close button on hover (like VS Code).
                 div()
@@ -254,7 +271,8 @@ impl Workspace {
                 let runnable = crate::project::run_command(&self.root, &b.path, &b.lang).is_some();
                 let debuggable = crate::debug::adapters::plan(&self.root, &b.path, &b.lang.lsp_id).is_some();
                 let csv = super::csv_table::is_csv(&b.path);
-                let md = b.is_markdown() || csv;
+                let glsl = b.lang.highlight == "glsl";
+                let md = b.is_markdown() || csv || glsl;
                 let preview = b.preview;
                 let ws = cx.entity().downgrade();
                 let module_buttons = self.module_buttons(crate::plugins::Placement::Editor, cx);
@@ -264,13 +282,16 @@ impl Workspace {
                     .when(runnable && !self.output.read(cx).is_running(), |el| el.child(icon_button(("run", pane), IconName::Play, "Run").on_click(cx.listener(move |t, _, w, cx| { focus_then(t); t.run_file(&RunFile, w, cx) }))))
                     .when(debuggable, |el| el.child(icon_button(("debug", pane), IconName::Bug, "Debug").on_click(cx.listener(move |t, _, w, cx| { focus_then(t); t.start_debug(&StartDebug, w, cx) }))))
                     .when(md, |el| {
-                        el.child(icon_button(("md", pane), if csv { IconName::Sheet } else { IconName::BookOpen }, if csv { "Table" } else { "Preview" }).selected(preview != Preview::Off).dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                        let (icon, label) = if csv { (IconName::Sheet, "Table") } else if glsl { (IconName::Zap, "Shader preview") } else { (IconName::BookOpen, "Preview") };
+                        el.child(icon_button(("md", pane), icon, label).selected(preview != Preview::Off).dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                             let set = |mode: Preview| {
                                 let ws = ws.clone();
-                                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                                     let _ = ws.update(cx, |t, cx| {
                                         if let Some(b) = t.pane_mut(pane).and_then(|p| p.active.and_then(|a| p.tabs.get_mut(a))).and_then(|tab| match tab { Tab::File(b) => Some(b), _ => None }) {
                                             b.preview = mode;
+                                            let path = b.path.clone();
+                                            t.refresh_shader_preview(&path, window, cx);
                                         }
                                         cx.notify();
                                     });
@@ -552,6 +573,8 @@ impl Workspace {
                 }
                 let preview = if super::csv_table::is_csv(&b.path) {
                     div().size_full().child(super::csv_table::view(SharedString::from(format!("csv-{pane}")), &b.path, &b.text(cx), cx))
+                } else if let Some(shader) = self.shader_previews.get(&b.path) {
+                    div().size_full().child(shader.clone())
                 } else { div().size_full().child(
                     v_flex()
                         .id(SharedString::from(format!("md-{pane}")))
@@ -573,10 +596,12 @@ impl Workspace {
             Tab::Diff { state, .. } => Diff::new(state).into_any_element(),
             Tab::Graph(g) => g.clone().into_any_element(),
             Tab::Agents(a) => a.clone().into_any_element(),
-            Tab::Image { path, zoom, scroll } => {
+            Tab::Image { path, zoom, scroll, crisp } => {
                 // Zoom 1 fits the pane; zoomed in, the frame grows from the pane's size and scrolls.
                 let (zoom, view) = (*zoom, scroll.bounds().size);
-                let frame = div().flex_none().p_4().child(img(path.clone()).object_fit(ObjectFit::Contain).size_full());
+                // Small images come pre-enlarged pixel by pixel, so they stay sharp.
+                let source: ImageSource = crisp.clone().map_or_else(|| path.clone().into(), Into::into);
+                let frame = div().flex_none().p_4().child(img(source).object_fit(ObjectFit::Contain).size_full());
                 let frame = if zoom > 1. { frame.w(view.width * zoom).h(view.height * zoom) } else { frame.size_full() };
                 let ws = cx.entity().downgrade();
                 div()
@@ -666,7 +691,21 @@ impl Workspace {
                     .child(h_flex().id(("tabs", id)).h_full().flex_1().min_w_0().overflow_x_scroll().children(tabs)
                         .on_drop(cx.listener(move |t, d: &DraggedTab, w, cx| t.move_tab(d.pane, d.ix, id, Zone::Center, w, cx)))
                         .on_drop(cx.listener(move |t, d: &DraggedFile, w, cx| t.open_path_in(d.0.clone(), id, Zone::Center, w, cx))))
-                    .child(actions),
+                    .child(actions)
+                    .child(div().pr_1().child(Button::new(("tabs-more", id)).ghost().xsmall().icon(IconName::Ellipsis).tooltip(t("More actions")).dropdown_menu_with_anchor(Anchor::TopRight, {
+                        let ws = cx.entity().downgrade();
+                        move |menu, _, _| {
+                            let close = |how: super::CloseTabs| {
+                                let ws = ws.clone();
+                                move |_: &ClickEvent, w: &mut Window, cx: &mut App| {
+                                    let _ = ws.update(cx, |t, cx| t.close_tabs(id, how, w, cx));
+                                }
+                            };
+                            menu.item(PopupMenuItem::new(t("Close saved")).on_click(close(super::CloseTabs::Saved)))
+                                .item(PopupMenuItem::new(t("Close all")).on_click(close(super::CloseTabs::All)))
+                                .item(PopupMenuItem::new(t("Save all and close")).on_click(close(super::CloseTabs::SaveAndCloseAll)))
+                        }
+                    }))),
             )
             .child(div().relative().flex_1().min_h_0().children(body).children(overlay))
             .into_any_element()
@@ -965,6 +1004,7 @@ impl Render for Workspace {
         let sidebar: AnyElement = match self.sidebar {
             Some(Sidebar::Git) => self.git.clone().into_any_element(),
             Some(Sidebar::Databases) => self.db_panel.clone().into_any_element(),
+            Some(Sidebar::Conan) => self.conan_panel.clone().into_any_element(),
             Some(Sidebar::Search) => self.search.clone().into_any_element(),
             _ => self.file_tree.clone().into_any_element(),
         };
