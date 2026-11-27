@@ -413,6 +413,8 @@ fn french(s: &str) -> Option<&'static str> {
         "Quit ForgeCode" => "Quitter ForgeCode",
         "Marketplace folder" => "Dossier du marketplace",
         "Current file" => "Fichier courant",
+        "Debugger" => "Débogueur",
+        "Breakpoint not placed:" => "Point d'arrêt non posé :",
         "No C/C++ debugger found and CodeLLDB could not be downloaded" => "Aucun débogueur C/C++ trouvé et CodeLLDB n'a pas pu être téléchargé",
         "missing after the download" => "manquant après le téléchargement",
         "Build stopped" => "Compilation arrêtée",

@@ -1,5 +1,5 @@
 name = "Conan"
-version = "1.3.0"
+version = "1.4.0"
 author = "ForgeCode"
 icon = "package"
 categories = ["C/C++", "Dépendances"]

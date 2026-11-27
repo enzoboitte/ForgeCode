@@ -539,9 +539,14 @@ impl Workspace {
             }
         });
 
-        if let Some(cmd) = crate::project::configure_command(&root) {
+        {
             let root = root.clone();
-            cx.background_spawn(async move { let _ = crate::ai::tools::run_shell(cmd, &root, &[], 120); }).detach();
+            cx.background_spawn(async move {
+                if let Some(cmd) = crate::project::configure_command(&root) {
+                    let _ = crate::ai::tools::run_shell(&cmd, &root, &[], 120);
+                }
+            })
+            .detach();
         }
         Self::load_project_folder(&root, cx);
         // Database changes an agent asks for: shown here, answered by the user.
@@ -1119,18 +1124,26 @@ impl Workspace {
     /// The CMake build description changed: configure again in the background, so the
     /// libraries it now pulls in are completed and checked.
     pub(super) fn reconfigure_if_cmake(&self, changed: &Path, cx: &mut Context<Self>) {
-        if let Some(cmd) = crate::project::reconfigure_command(&self.root, changed) {
-            let root = self.root.clone();
-            cx.background_spawn(async move { let _ = crate::ai::tools::run_shell(cmd, &root, &[], 300); }).detach();
+        if crate::project::is_cmake_file(changed) {
+            let (root, changed) = (self.root.clone(), changed.to_path_buf());
+            cx.background_spawn(async move {
+                if let Some(cmd) = crate::project::reconfigure_command(&root, &changed) {
+                    let _ = crate::ai::tools::run_shell(&cmd, &root, &[], 300);
+                }
+            })
+            .detach();
         }
     }
 
     /// CMake projects get `build/compile_commands.json` in the background so clangd understands them.
     fn configure_project(&self, cx: &mut Context<Self>) {
-        if let Some(cmd) = crate::project::configure_command(&self.root) {
-            let root = self.root.clone();
-            cx.background_spawn(async move { let _ = crate::ai::tools::run_shell(cmd, &root, &[], 120); }).detach();
-        }
+        let root = self.root.clone();
+        cx.background_spawn(async move {
+            if let Some(cmd) = crate::project::configure_command(&root) {
+                let _ = crate::ai::tools::run_shell(&cmd, &root, &[], 120);
+            }
+        })
+        .detach();
     }
 
     /// `.forgecode/`: created for real projects, and its settings become the project layer.

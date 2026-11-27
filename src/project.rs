@@ -29,7 +29,55 @@ pub fn detect(root: &Path) -> BuildSystem {
     }
 }
 
-pub const CMAKE_BUILD: &str = "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && cmake --build build";
+/// Configure and build the CMake project in `build/` (Debug).
+pub fn cmake_build(root: &Path) -> String {
+    format!("{} && cmake --build build", cmake_configure(root))
+}
+
+fn has(program: &str) -> bool {
+    crate::lsp::install::which(program).is_some()
+}
+
+/// CMake's generator for `build/`, from the tools installed: on Windows NMake (CMake's default
+/// without Visual Studio's generator) only works in Visual Studio's environment, MinGW has its
+/// own make. Empty: CMake's default, or the one `build/` was configured with.
+fn cmake_generator(build: &Path) -> &'static str {
+    drop_stale_cache(build);
+    if build.join("CMakeCache.txt").exists() || !cfg!(windows) {
+        return "";
+    }
+    if has("ninja") {
+        " -G Ninja"
+    } else if has("cl") && has("nmake") {
+        " -G \"NMake Makefiles\""
+    } else if has("mingw32-make") {
+        " -G \"MinGW Makefiles\""
+    } else {
+        ""
+    }
+}
+
+/// A `build/` configured with a generator whose tool is missing (an NMake attempt without Visual
+/// Studio): its cache would fail every time, configure from scratch.
+fn drop_stale_cache(build: &Path) {
+    let Ok(cache) = std::fs::read_to_string(build.join("CMakeCache.txt")) else { return };
+    let generator = cache.lines().find_map(|l| l.strip_prefix("CMAKE_GENERATOR:INTERNAL=")).unwrap_or("");
+    let tool = match generator {
+        "NMake Makefiles" => "nmake",
+        "MinGW Makefiles" => "mingw32-make",
+        "Ninja" => "ninja",
+        "Unix Makefiles" => "make",
+        _ => return,
+    };
+    if !has(tool) {
+        let _ = std::fs::remove_file(build.join("CMakeCache.txt"));
+        let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
+    }
+}
+
+fn cmake_configure(root: &Path) -> String {
+    format!("cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON{}", cmake_generator(&root.join("build")))
+}
 
 /// Shell snippet running the most recently built executable under `dir`.
 #[cfg(windows)]
@@ -53,7 +101,7 @@ pub fn run_command(root: &Path, file: &Path, lang: &LanguageInfo) -> Option<Stri
     let c_like = matches!(lang.lsp_id.as_str(), "c" | "cpp") || matches!(lang.highlight.as_str(), "cmake" | "make");
     let script = match detect(root) {
         BuildSystem::Cargo if lang.lsp_id == "rust" || lang.highlight == "toml" => "cargo run".to_string(),
-        BuildSystem::CMake if c_like => format!("{CMAKE_BUILD} && {}", run_newest("build")),
+        BuildSystem::CMake if c_like => format!("{} && {}", cmake_build(root), run_newest("build")),
         BuildSystem::Make if c_like => format!("make && {}", run_newest(".")),
         BuildSystem::Npm if has_npm_start(root) && matches!(lang.lsp_id.as_str(), "javascript" | "typescript" | "javascriptreact" | "typescriptreact" | "json") => "npm start".into(),
         _ => return lang.run.as_ref().map(|t| language::expand(t, Some(file), root)),
@@ -132,11 +180,75 @@ fn is_executable(path: &Path, _: &std::fs::Metadata) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))
 }
 
-/// CMake projects need `compile_commands.json` for clangd: configure once if missing.
-const CMAKE_CONFIGURE: &str = "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON";
+/// How CTest runs the program `exe` when it is one of its tests: (working folder, environment).
+/// Asks `ctest --show-only=json-v1` in the topmost build folder above it that CTest knows.
+pub fn ctest_context(root: &Path, exe: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let top = exe.ancestors().skip(1).take_while(|d| d.starts_with(root) && *d != root).filter(|d| d.join("CTestTestfile.cmake").is_file()).last()?;
+    let out = crate::util::command("ctest").args(["--show-only=json-v1"]).current_dir(top).output().ok()?;
+    ctest_lookup(&String::from_utf8_lossy(&out.stdout), exe)
+}
 
-pub fn configure_command(root: &Path) -> Option<&'static str> {
-    (detect(root) == BuildSystem::CMake && !root.join("build/compile_commands.json").exists()).then_some(CMAKE_CONFIGURE)
+fn ctest_lookup(json: &str, exe: &Path) -> Option<(PathBuf, Vec<String>)> {
+    // Same file whatever the slashes, case (Windows) or `\\?\` prefix.
+    let key = |p: &Path| {
+        let s = crate::util::plain_path(p.to_path_buf()).display().to_string().replace('\\', "/");
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
+    let tests: serde_json::Value = serde_json::from_str(json).ok()?;
+    let test = tests["tests"].as_array()?.iter().find(|t| t["command"][0].as_str().is_some_and(|c| key(Path::new(c)) == key(exe)))?;
+    let prop = |name: &str| test["properties"].as_array().into_iter().flatten().find(|p| p["name"] == name).map(|p| p["value"].clone());
+    let dir = prop("WORKING_DIRECTORY").and_then(|v| v.as_str().map(PathBuf::from)).or_else(|| exe.parent().map(Path::to_path_buf))?;
+    let env = prop("ENVIRONMENT").and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().filter_map(|e| e.as_str().map(String::from)).collect();
+    Some((dir, env))
+}
+
+/// clangd finds `build/compile_commands.json`: put there the newest one a build wrote deeper
+/// (`build/windows-gcc-16-debug/`, a preset's folder). Whether there is one now.
+pub fn adopt_compile_commands(root: &Path) -> bool {
+    let target = root.join("build").join("compile_commands.json");
+    if target.is_file() || root.join("compile_commands.json").is_file() {
+        return true;
+    }
+    let newest = ignore::WalkBuilder::new(root.join("build"))
+        .max_depth(Some(3))
+        .hidden(false)
+        .git_ignore(false)
+        .build()
+        .flatten()
+        .filter(|e| e.file_name() == "compile_commands.json")
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.into_path())))
+        .max_by_key(|(t, _)| *t);
+    newest.is_some_and(|(_, found)| std::fs::copy(found, &target).is_ok())
+}
+
+/// How to get `compile_commands.json` for clangd in a CMake project that has none: through its
+/// presets (Conan's included), else a plain configure with an installed generator. None for a
+/// Conan project not installed yet (its dependencies come first) or when one exists already.
+pub fn configure_command(root: &Path) -> Option<String> {
+    if adopt_compile_commands(root) {
+        return None;
+    }
+    configure(root)
+}
+
+fn configure(root: &Path) -> Option<String> {
+    if !root.join("CMakeLists.txt").is_file() || !has("cmake") {
+        return None;
+    }
+    let presets = crate::launch::configure_presets(root);
+    let preset = presets.iter().find(|(n, _)| n.to_lowercase().contains("debug")).or(presets.first());
+    if let Some((name, dir)) = preset {
+        let db = dir.join("compile_commands.json");
+        return Some(format!(
+            "cmake --preset \"{name}\" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && cmake -E make_directory build && cmake -E copy_if_different \"{}\" \"{}\"",
+            db.display(),
+            root.join("build").join("compile_commands.json").display()
+        ));
+    }
+    if root.join("conanfile.py").is_file() || root.join("conanfile.txt").is_file() {
+        return None;
+    }
+    Some(cmake_configure(root))
 }
 
 /// Whether `path` is part of the CMake build description (`CMakeLists.txt`, `*.cmake`, presets).
@@ -147,8 +259,8 @@ pub fn is_cmake_file(path: &Path) -> bool {
 
 /// Configure again after the build description changed (a library added with `find_package`,
 /// `FetchContent`, `target_link_libraries`…): clangd then knows the new include paths.
-pub fn reconfigure_command(root: &Path, changed: &Path) -> Option<&'static str> {
-    (detect(root) == BuildSystem::CMake && is_cmake_file(changed) && !changed.starts_with(root.join("build"))).then_some(CMAKE_CONFIGURE)
+pub fn reconfigure_command(root: &Path, changed: &Path) -> Option<String> {
+    (is_cmake_file(changed) && !changed.starts_with(root.join("build"))).then(|| configure(root)).flatten()
 }
 
 // ---- templates ----------------------------------------------------------------------------------
@@ -247,6 +359,39 @@ mod cmake_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// compile_commands.json: an existing one deeper in build/ is used; a Conan project goes
+    /// through its preset (never a bare configure, which can't find its dependencies).
+    #[test]
+    fn compile_commands_the_project_s_way() {
+        if !has("cmake") {
+            return eprintln!("cmake not installed, skipping");
+        }
+        let root = std::env::temp_dir().join(format!("forge-cc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("build/gcc-debug")).unwrap();
+        std::fs::write(root.join("CMakeLists.txt"), "").unwrap();
+        std::fs::write(root.join("conanfile.py"), "").unwrap();
+        assert_eq!(configure_command(&root), None, "Conan not installed yet: nothing to configure");
+        std::fs::write(root.join("CMakeUserPresets.json"), r#"{"version": 4, "configurePresets": [{"name": "conan-release", "binaryDir": "${sourceDir}/build/gcc-release"}, {"name": "conan-debug", "binaryDir": "${sourceDir}/build/gcc-debug"}]}"#).unwrap();
+        let cmd = configure_command(&root).unwrap();
+        assert!(cmd.starts_with("cmake --preset \"conan-debug\""), "{cmd}");
+        std::fs::write(root.join("build/gcc-debug/compile_commands.json"), "[]").unwrap();
+        assert_eq!(configure_command(&root), None, "the build's own database is adopted");
+        assert!(root.join("build/compile_commands.json").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runs_tests_where_ctest_does() {
+        let json = r#"{"kind": "ctestInfo", "tests": [
+            {"name": "other", "command": ["/b/other"]},
+            {"name": "Suite.Case", "command": ["/b/tests/app_test", "--gtest_filter=Suite.Case"], "properties": [
+                {"name": "WORKING_DIRECTORY", "value": "/b/tests"}, {"name": "ENVIRONMENT", "value": ["DATA=/d"]}]}]}"#;
+        assert_eq!(ctest_lookup(json, Path::new("/b/tests/app_test")), Some((PathBuf::from("/b/tests"), vec!["DATA=/d".to_string()])));
+        assert_eq!(ctest_lookup(json, Path::new("/b/other")), Some((PathBuf::from("/b"), vec![])), "CTest's default: the program's folder");
+        assert_eq!(ctest_lookup(json, Path::new("/b/app")), None);
+    }
     use crate::plugins::Plugins;
 
     fn tmp(tag: &str) -> PathBuf {

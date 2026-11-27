@@ -53,7 +53,7 @@ pub fn plan(root: &Path, file: &Path, lsp_id: &str) -> Option<Plan> {
     let native = |build: String, program| Some(Plan::native(Some(build), program));
     match (lsp_id, detect(root)) {
         ("rust", _) => native("cargo build --message-format=json-render-diagnostics".into(), Program::FromCargo),
-        ("c" | "cpp", BuildSystem::CMake) => native(crate::project::CMAKE_BUILD.into(), Program::Newest(root.join("build"))),
+        ("c" | "cpp", BuildSystem::CMake) => native(crate::project::cmake_build(root), Program::Newest(root.join("build"))),
         ("c" | "cpp", BuildSystem::Make) => native("make".into(), Program::Newest(root.to_path_buf())),
         ("c", _) => native(format!("cc -g -O0 {} \"{}\" -o \"{exe}\"", crate::language::include_flags(root), file.display()), Program::Path(exe)),
         ("cpp", _) => native(format!("c++ -std=c++20 -g -O0 {} \"{}\" -o \"{exe}\"", crate::language::include_flags(root), file.display()), Program::Path(exe)),

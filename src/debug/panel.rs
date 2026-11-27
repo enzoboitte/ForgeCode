@@ -199,13 +199,25 @@ impl DebugPanel {
                 launch["cwd"] = cwd.display().to_string().into();
             }
             let mut env: Vec<String> = plan.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let mut cwd_given = plan.cwd.is_some();
             if let Some(m) = &module {
                 env.extend(m["env"].as_object().into_iter().flatten().map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or(""))));
-                if let Some(cwd) = m["cwd"].as_str() {
+                if let Some(cwd) = m["cwd"].as_str().filter(|_| !cwd_given) {
                     launch["cwd"] = cwd.into();
+                    cwd_given = true;
                 }
                 if let Some(args) = m["args"].as_array() {
                     launch["args"] = json!(args);
+                }
+            }
+            // A test program runs where CTest runs it (its files are found relative to that folder),
+            // with CTest's environment: as `ctest` / `make test` do.
+            if !cwd_given {
+                let (root, exe) = (workspace.clone(), PathBuf::from(&program));
+                if let Some((dir, vars)) = cx.background_spawn(async move { crate::project::ctest_context(&root, &exe) }).await {
+                    let _ = this.update(cx, |this, cx| this.log(format!("CTest: {}", dir.display()), cx));
+                    launch["cwd"] = dir.display().to_string().into();
+                    env.extend(vars);
                 }
             }
             if !env.is_empty() {
@@ -230,18 +242,21 @@ impl DebugPanel {
         let (tx, rx) = smol::channel::unbounded();
         this.update(cx, |this, cx| { this.status = t("Installing the debugger if needed…").into(); cx.notify(); })?;
         let (dir, events) = (cwd.clone(), tx.clone());
-        let (client, port, gdb) = cx
+        let (client, port, gdb, used) = cx
             .background_spawn(async move {
                 let (argv, tcp) = adapters::command(adapter, &settings, &dir)?;
                 let gdb = dap::env_as_object(&argv);
+                let used = argv.first().cloned().unwrap_or_default();
                 if tcp {
                     let port = dap::free_port()?;
-                    anyhow::Ok((DapClient::start_tcp(&argv, &dir, port, events)?, Some(port), gdb))
+                    anyhow::Ok((DapClient::start_tcp(&argv, &dir, port, events)?, Some(port), gdb, used))
                 } else {
-                    anyhow::Ok((DapClient::start(&argv, &dir, events)?, None, gdb))
+                    anyhow::Ok((DapClient::start(&argv, &dir, events)?, None, gdb, used))
                 }
             })
             .await?;
+        // Which debugger runs: the first thing to know when something goes wrong.
+        this.update(cx, |this, cx| this.log(format!("{}: {used}", t("Debugger")), cx))?;
         if gdb {
             launch = dap::adapt_launch(launch);
         }
@@ -259,7 +274,12 @@ impl DebugPanel {
             match event {
                 DapEvent::Initialized => {
                     for (path, lines) in &breakpoints {
-                        set_breakpoints(&client, path, lines).await?;
+                        // A breakpoint the debugger can't place (no debug info, another program,
+                        // a path it doesn't know) is said, not silently ignored.
+                        let refused = set_breakpoints(&client, path, lines).await?;
+                        if !refused.is_empty() {
+                            this.update(cx, |this, cx| for r in refused { this.log(format!("{} {r}", t("Breakpoint not placed:")), cx) })?;
+                        }
                     }
                     if adapter == Adapter::Python {
                         // debugpy stops on uncaught exceptions only when asked.
@@ -406,12 +426,21 @@ fn spawn_launch(client: &Arc<DapClient>, request: &str, args: Value, events: smo
     .detach();
 }
 
-async fn set_breakpoints(client: &DapClient, path: &std::path::Path, lines: &BTreeSet<u32>) -> anyhow::Result<()> {
+/// Set the file's breakpoints; the ones the debugger did not verify, as `file:line (reason)`.
+async fn set_breakpoints(client: &DapClient, path: &std::path::Path, lines: &BTreeSet<u32>) -> anyhow::Result<Vec<String>> {
     let bps: Vec<Value> = lines.iter().map(|l| json!({"line": l})).collect();
-    client
+    let body = client
         .request("setBreakpoints", json!({"source": {"path": path.display().to_string()}, "breakpoints": bps}))
         .await?;
-    Ok(())
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    Ok(body["breakpoints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .zip(lines)
+        .filter(|(b, _)| b["verified"] == false)
+        .map(|(b, line)| format!("{name}:{line}{}", b["message"].as_str().map(|m| format!(" ({m})")).unwrap_or_default()))
+        .collect())
 }
 
 async fn stack_trace(client: &DapClient, thread_id: i64) -> anyhow::Result<Vec<Frame>> {

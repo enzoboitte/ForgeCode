@@ -405,7 +405,7 @@ mod tests {
         let text = "#include <geo/shape.hpp>\nint main() {\n  geo::Circle c;\n  c.rad\n}\n";
         std::fs::write(&main, text).unwrap();
         let cmd = crate::project::configure_command(&root).expect("a CMake project");
-        let out = crate::ai::tools::run_shell(cmd, &root, &[], 120);
+        let out = crate::ai::tools::run_shell(&cmd, &root, &[], 120);
         assert!(root.join("build/compile_commands.json").is_file(), "{out:?}");
         let lang = crate::language::detect(&main, &crate::plugins::Plugins::default());
         let argv = crate::lsp::install::resolve(&lang.server).unwrap();

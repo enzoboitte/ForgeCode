@@ -101,18 +101,14 @@ pub fn advise(root: &Path, lsp_id: &str, server: Option<&str>, has: &dyn Fn(&str
             Some(("go.dev/dl".into(), Fix::OpenUrl("https://go.dev/dl/".into()))),
         ),
         "c" | "cpp" => {
-            let database = exists("compile_commands.json") || exists("build/compile_commands.json");
-            if !database && exists("CMakeLists.txt") && has("cmake") {
+            // One a build already wrote deeper in build/ is used as it is.
+            let database = crate::project::adopt_compile_commands(root);
+            let configure = if database || !exists("CMakeLists.txt") || !has("cmake") { None } else { crate::project::configure_command(root) };
+            if let Some(command) = configure {
                 push(
                     "compile-commands",
                     t("Generate compile_commands.json so errors use the project's real include paths and flags").into(),
-                    Some((
-                        t("Generate").into(),
-                        Fix::Run {
-                            title: "CMake".into(),
-                            command: "cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && ln -sf build/compile_commands.json compile_commands.json".into(),
-                        },
-                    )),
+                    Some((t("Generate").into(), Fix::Run { title: "CMake".into(), command })),
                 );
             } else if !database && (exists("Makefile") || exists("makefile")) && has("bear") {
                 push(

@@ -439,7 +439,8 @@ def cmd_build(arg, profile=""):
             call([cmake, "--build", "--preset", found[1], "--parallel"], "la compilation a échoué")
         else:
             call([cmake, "--build", os.path.join("build", bt), "--config", bt, "--parallel"], "la compilation a échoué")
-    forge("launch", env=run_env(bt), cwd=WORKSPACE)
+    # The working folder is ForgeCode's choice (CTest's for a test program, else the project).
+    forge("launch", env=run_env(bt))
 
 
 def json_launch():

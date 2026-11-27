@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::debug::adapters::{self, Plan};
-use crate::project::{CMAKE_BUILD, Program, executables};
+use crate::project::{Program, cmake_build, executables};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
@@ -33,7 +33,7 @@ pub fn targets(root: &Path, file: Option<(&Path, &str)>, modules: &[ModuleLaunch
     if has("cmake") {
         all.extend(cmake_presets(root));
         if root.join("CMakeLists.txt").is_file() {
-            all.push(build("CMake", "cmake -B build (Debug)", CMAKE_BUILD, root.join("build")));
+            all.push(build("CMake", "cmake -B build (Debug)", &cmake_build(root), root.join("build")));
         }
     }
     if let Some(make) = make_program().filter(|_| ["Makefile", "makefile", "GNUmakefile"].iter().any(|m| root.join(m).is_file())) {
@@ -189,7 +189,7 @@ fn vscode_targets(root: &Path, file: Option<&Path>) -> Vec<Target> {
 fn task_command(tasks: &Value, label: &str, root: &Path, file: Option<&Path>) -> Option<String> {
     let task = tasks["tasks"].as_array()?.iter().find(|t| t["label"] == label)?;
     if task["type"] == "cmake" {
-        return Some(CMAKE_BUILD.into());
+        return Some(cmake_build(root));
     }
     let quote = |s: String| if s.contains(' ') && !s.starts_with('"') { format!("\"{s}\"") } else { s };
     let command = expand_vars(task["command"].as_str()?, root, file);
@@ -335,6 +335,17 @@ pub fn launch_override(output: &str) -> Option<Value> {
 
 /// The configure presets of CMakePresets.json / CMakeUserPresets.json (and the files they include),
 /// each built with its build preset when there is one.
+/// The visible configure presets: (name, build folder).
+pub fn configure_presets(root: &Path) -> Vec<(String, PathBuf)> {
+    cmake_presets(root)
+        .into_iter()
+        .filter_map(|t| match t.plan.program {
+            Program::Newest(dir) => Some((t.detail, dir)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn cmake_presets(root: &Path) -> Vec<Target> {
     let mut configure: Vec<Value> = vec![];
     let mut build: Vec<Value> = vec![];
