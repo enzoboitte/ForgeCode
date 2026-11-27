@@ -187,15 +187,19 @@ impl Toolbox {
             }
             "write_file" => {
                 let path = self.resolve_for_write(str_arg("path")?)?;
-                let content = str_arg("content")?;
+                // An existing CRLF file keeps its line ends, not just the lines the model touched.
+                let crlf = std::fs::read_to_string(&path).is_ok_and(|t| t.contains("\r\n"));
+                let content = &line_ends(str_arg("content")?, crlf);
                 self.remember(&path);
                 std::fs::write(&path, content)?;
                 Ok((format!("Wrote {} ({} bytes)", path.display(), content.len()), SideEffect::FileChanged(path)))
             }
             "edit_file" => {
                 let path = self.resolve_for_write(str_arg("path")?)?;
-                let (old, new) = (str_arg("old")?, str_arg("new")?);
                 let text = std::fs::read_to_string(&path)?;
+                // Models write `\n`: in a CRLF file (Windows) `old` would never match as sent.
+                let crlf = text.contains("\r\n");
+                let (old, new) = (&*line_ends(str_arg("old")?, crlf), &*line_ends(str_arg("new")?, crlf));
                 let count = text.matches(old).count();
                 let all = a["replace_all"].as_bool().unwrap_or(false);
                 if count == 0 {
@@ -424,6 +428,11 @@ fn job_output(job: usize, wait_secs: u64, watch: &mut dyn FnMut(&str) -> Signal)
     Ok(format!("{fresh}\n[job {job}: {state}]"))
 }
 
+/// `s` with `\r\n` line ends when `crlf`, otherwise unchanged.
+fn line_ends(s: &str, crlf: bool) -> String {
+    if crlf { s.replace("\r\n", "\n").replace('\n', "\r\n") } else { s.to_string() }
+}
+
 pub fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT {
         let mut cut = MAX_OUTPUT;
@@ -462,6 +471,13 @@ mod tests {
         let job = out.split("background job ").nth(1).and_then(|r| r.split('.').next()).unwrap().to_string();
         let (later, _) = tb.run("bash_output", &json!({"job": job.parse::<u64>().unwrap(), "wait_secs": 10}));
         assert!(later.contains("end") && later.contains("finished, exit status 0"), "{later}");
+        // Windows line ends: `old` sent with `\n` still matches, and the file stays CRLF.
+        std::fs::write(dir.join("w.cpp"), "#include <a>\r\nint main() {}\r\n").unwrap();
+        let (out, _) = tb.run("edit_file", &json!({"path": "w.cpp", "old": "#include <a>\nint", "new": "#define X\n#include <a>\nint"}));
+        assert!(out.starts_with("Edited"), "{out}");
+        assert_eq!(std::fs::read_to_string(dir.join("w.cpp")).unwrap(), "#define X\r\n#include <a>\r\nint main() {}\r\n");
+        tb.run("write_file", &json!({"path": "w.cpp", "content": "a\nb\n"}));
+        assert_eq!(std::fs::read_to_string(dir.join("w.cpp")).unwrap(), "a\r\nb\r\n");
         tb.run("write_file", &json!({"file_path": "alias.txt", "contents": "ok"}));
         assert_eq!(std::fs::read_to_string(dir.join("alias.txt")).unwrap(), "ok", "argument aliases");
         let rel = dir.strip_prefix("/").unwrap().join("alias.txt").display().to_string();
