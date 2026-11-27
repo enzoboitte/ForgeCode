@@ -325,6 +325,7 @@ impl Workspace {
             Tab::Image { path, zoom, .. } => {
                 let path = path.clone();
                 actions
+                    .child(icon_button(("img-out", pane), IconName::Minus, "Zoom out").on_click(cx.listener(move |t, _, _, cx| t.zoom_image(pane, 1. / 1.25, None, cx))))
                     .child(Button::new(("img-size", pane)).ghost().xsmall().label(format!("{:.0} %", zoom * 100.)).tooltip(t("Fit")).on_click(cx.listener(move |t, _, _, cx| {
                         if let Some(Tab::Image { zoom, scroll, .. }) = t.pane_mut(pane).and_then(|p| p.active.and_then(|a| p.tabs.get_mut(a))) {
                             *zoom = 1.;
@@ -332,6 +333,7 @@ impl Workspace {
                         }
                         cx.notify();
                     })))
+                    .child(icon_button(("img-in", pane), IconName::Plus, "Zoom in").on_click(cx.listener(move |t, _, _, cx| t.zoom_image(pane, 1.25, None, cx))))
                     .child(icon_button(("img-open", pane), IconName::ExternalLink, "Open with default app").on_click(move |_, _, cx| cx.open_with_system(&path)))
                     .child(split)
                     .into_any_element()
@@ -603,7 +605,8 @@ impl Workspace {
                 // Small images come pre-enlarged pixel by pixel, so they stay sharp.
                 let source: ImageSource = crisp.clone().map_or_else(|| path.clone().into(), Into::into);
                 let frame = div().flex_none().p_4().child(img(source).object_fit(ObjectFit::Contain).size_full());
-                let frame = if zoom > 1. { frame.w(view.width * zoom).h(view.height * zoom) } else { frame.size_full() };
+                // Zoomed out, the smaller frame sits in the middle (`m_auto`); zoomed in, it scrolls.
+                let frame = if zoom == 1. { frame.size_full() } else { frame.m_auto().w(view.width * zoom).h(view.height * zoom) };
                 let ws = cx.entity().downgrade();
                 div()
                     .size_full()
@@ -611,14 +614,7 @@ impl Workspace {
                     .bg(cx.theme().secondary.opacity(0.3))
                     .child(div().id(SharedString::from(format!("image-{}", path.display()))).size_full().flex().overflow_scroll().track_scroll(scroll).child(frame))
                     .child(super::viewer::wheel_zoom(move |factor, mouse, _, cx| {
-                        let _ = ws.update(cx, |t, cx| {
-                            if let Some(Tab::Image { zoom, scroll, .. }) = t.pane_mut(pane).and_then(|p| p.active.and_then(|a| p.tabs.get_mut(a))) {
-                                let new = (*zoom * factor).clamp(1., 10.);
-                                super::viewer::zoom_scroll(scroll, mouse, new / *zoom);
-                                *zoom = new;
-                            }
-                            cx.notify();
-                        });
+                        let _ = ws.update(cx, |t, cx| t.zoom_image(pane, factor, Some(mouse), cx));
                     }))
                     .scrollbar(scroll, ScrollbarAxis::Both)
                     .into_any_element()
@@ -763,6 +759,17 @@ impl Workspace {
             )
             .children(overlay)
             .into_any_element()
+    }
+
+    /// Zoom the image of `pane` by `factor`, around `mouse` (the view's corner from the toolbar),
+    /// from 10 % (1 = fits the pane) to 1000 %.
+    fn zoom_image(&mut self, pane: usize, factor: f32, mouse: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        if let Some(Tab::Image { zoom, scroll, .. }) = self.pane_mut(pane).and_then(|p| p.active.and_then(|a| p.tabs.get_mut(a))) {
+            let new = (*zoom * factor).clamp(super::viewer::ZOOM_MIN, 10.);
+            super::viewer::zoom_scroll(scroll, mouse.unwrap_or(scroll.bounds().origin), new / *zoom);
+            *zoom = new;
+        }
+        cx.notify();
     }
 
     fn render_problems(&self, cx: &mut Context<Self>) -> AnyElement {

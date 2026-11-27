@@ -20,6 +20,9 @@ const MAX_SIDE: f32 = 4096.;
 /// Catches cmd/ctrl+wheel and the trackpad pinch over its parent, which must be `relative`.
 /// Runs in the capture phase so nothing scrolls, and reports the zoom factor and the cursor
 /// position.
+/// The smallest zoom of images and documents: a whole page or a large image at a glance.
+pub const ZOOM_MIN: f32 = 0.1;
+
 pub fn wheel_zoom(on_zoom: impl Fn(f32, Point<Pixels>, &mut Window, &mut App) + 'static) -> impl IntoElement {
     let on_zoom = std::rc::Rc::new(on_zoom);
     canvas(
@@ -325,7 +328,7 @@ impl PdfView {
 
     /// Zoom around `mouse` (the viewport's top-left corner when `None`).
     pub fn set_zoom(&mut self, zoom: f32, mouse: Option<Point<Pixels>>, cx: &mut Context<Self>) {
-        let zoom = zoom.clamp(0.25, 5.);
+        let zoom = zoom.clamp(ZOOM_MIN, 5.);
         zoom_scroll(&self.scroll, mouse.unwrap_or(self.scroll.bounds().origin), zoom / self.zoom);
         self.zoom = zoom;
         cx.notify();
@@ -655,6 +658,10 @@ mod tests {
         let ctrl = Modifiers { control: true, ..Default::default() };
         cx.simulate_event(ScrollEvent { position: at, delta: ScrollDelta::Pixels(point(px(0.), px(-200.))), modifiers: ctrl, ..Default::default() });
         assert!(view.read_with(cx, |v, _| v.zoom) < 1.5, "ctrl+wheel zooms out");
+        for _ in 0..30 {
+            cx.simulate_event(ScrollEvent { position: at, delta: ScrollDelta::Pixels(point(px(0.), px(-200.))), modifiers: ctrl, ..Default::default() });
+        }
+        assert_eq!(view.read_with(cx, |v, _| v.zoom), super::ZOOM_MIN, "down to 10 %, not 100 % or 25 %");
     }
 
     /// Dragging past the bottom of the view scrolls and keeps selecting; shift-click extends.
