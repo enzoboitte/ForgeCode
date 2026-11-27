@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -64,7 +64,7 @@ impl AcpClient {
     /// Blocking: call off the UI thread.
     pub fn start_traced(argv: &[String], cwd: &Path, env: &[(String, String)], events: smol::channel::Sender<AcpEvent>, trace: Option<PathBuf>) -> Result<Arc<Self>> {
         let (program, args) = argv.split_first().context("empty agent command")?;
-        let mut child = Command::new(program)
+        let mut child = crate::util::command(program)
             .args(args)
             .current_dir(cwd)
             .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -421,7 +421,7 @@ while True:
         let _ = std::fs::remove_dir_all(&state);
         if std::env::var("FORGE_REAL_HOME").is_ok() {
             // A copy of the real state (memory, sessions, skills), not the live folder.
-            let ok = std::process::Command::new("cp").arg("-R").arg(fc.join("agents/hermes")).arg(&state).status().unwrap();
+            let ok = crate::util::command("cp").arg("-R").arg(fc.join("agents/hermes")).arg(&state).status().unwrap();
             assert!(ok.success());
         } else {
             std::fs::create_dir_all(&state).unwrap();

@@ -149,9 +149,8 @@ impl MarketplaceView {
         }
         v_flex()
             .id(("mk-card", ix))
-            .flex_1()
-            .min_w(px(280.))
-            .max_w(px(420.))
+            .debug_selector(move || format!("mk-card-{ix}"))
+            .w_full()
             .gap_2()
             .p_3()
             .rounded_lg()
@@ -194,7 +193,9 @@ impl MarketplaceView {
 }
 
 impl Render for MarketplaceView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Equal columns, about 300 px each in the settings page (the window less its sidebar).
+        let columns = ((f32::from(window.viewport_size().width) - 260.) / 300.).floor().clamp(1., 4.) as u16;
         let (entries, errors) = self.entries(cx);
         let query = self.search.read(cx).value().to_lowercase();
         let counts = (entries.len(), entries.iter().filter(|e| e.installed.is_some()).count(), entries.iter().filter(|e| e.update().is_some()).count());
@@ -253,7 +254,39 @@ impl Render for MarketplaceView {
                         .child(div().text_sm().child(if query.is_empty() { t("No extension in this folder.") } else { t("No extension matches this search.") })),
                 )
             })
-            .child(h_flex().flex_wrap().gap_3().children(cards))
+            .child(div().grid().grid_cols(columns).gap_3().children(cards))
             .children(errors.into_iter().map(|(path, e)| div().text_xs().text_color(theme.danger).child(format!("{}: {e}", path.display()))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{AppContext as _, TestAppContext};
+
+    /// The extension cards share equal columns: one alone on the last row is as wide as the others.
+    #[gpui_kit::test]
+    fn cards_have_equal_widths(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let base = crate::settings::Settings::default();
+            cx.set_global(base.clone());
+            cx.set_global(crate::settings::Layers { base, ..Default::default() });
+            cx.set_global(crate::plugins::Plugins::default());
+        });
+        let market = crate::plugins::marketplace::marketplace_dir("");
+        crate::plugins::marketplace::seed(&market).unwrap();
+        struct V;
+        impl gpui_kit::Render for V {
+            fn render(&mut self, window: &mut gpui_kit::Window, cx: &mut gpui_kit::Context<Self>) -> impl gpui_kit::IntoElement {
+                super::view(window, cx)
+            }
+        }
+        let (_, cx) = cx.add_window_view(|window, cx| gpui_kit::base::Root::new(cx.new(|_| V), window, cx));
+        // 3 columns for the 4 bundled extensions: the 4th is alone on its row.
+        cx.simulate_resize(gpui_kit::size(gpui_kit::px(1200.), gpui_kit::px(900.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let widths: Vec<_> = (0..4).map(|i| cx.debug_bounds(Box::leak(format!("mk-card-{i}").into_boxed_str())).expect("card").size.width).collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
     }
 }

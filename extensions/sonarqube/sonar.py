@@ -443,7 +443,7 @@ def rule():
     if not key:
         raise Fail("Indiquez la clé de la règle (ex. python:S1192).")
     r = api(cfg, "/api/rules/show", {"key": key})["rule"]
-    print(f"{r['key']} — {r['name']} ({r.get('severity', '')}, {r.get('type', '')})\n")
+    print(f"{r['key']} - {r['name']} ({r.get('severity', '')}, {r.get('type', '')})\n")
     sections = r.get("descriptionSections") or [{"content": r.get("htmlDesc", "")}]
     for section in sections:
         text = re.sub(r"<pre>(.*?)</pre>", lambda m: "\n" + m.group(1) + "\n", section.get("content", ""), flags=re.S)

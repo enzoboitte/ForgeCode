@@ -189,7 +189,7 @@ impl TableTab {
 
     pub fn title(&self, cx: &App) -> String {
         let conn = self.hub.read(cx).conn(&self.conn).map(|c| c.name.clone()).unwrap_or_default();
-        format!("{} · {conn}", self.table)
+        format!("{} | {conn}", self.table)
     }
 
     fn info(&self, cx: &App) -> Option<TableInfo> {
@@ -343,7 +343,7 @@ impl TableTab {
             .map(|c| {
                 let placeholder = match &c.default {
                     Some(d) if !d.is_null() => format!("{} ({} {})", c.ty, t("default"), cell_text(d)),
-                    _ if c.nullable => format!("{} · NULL", c.ty),
+                    _ if c.nullable => format!("{} | NULL", c.ty),
                     _ => c.ty.clone(),
                 };
                 (c.name.clone(), c.ty.clone(), cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)))
@@ -355,7 +355,7 @@ impl TableTab {
             let theme = cx.theme().clone();
             let fields2 = fields.clone();
             let (view, table) = (view.clone(), table.clone());
-            dialog.title(format!("{} · {}", t("New row"), table)).w(px(480.)).child(
+            dialog.title(format!("{} | {}", t("New row"), table)).w(px(480.)).child(
                 v_flex()
                     .gap_2()
                     .child(div().text_xs().text_color(theme.muted_foreground).child(t("Leave a field empty to use its default value.")))
@@ -448,7 +448,7 @@ impl TableTab {
                         .detach();
                 })
             };
-            dialog.title(format!("{} · {}", t("Structure"), table)).w(px(460.)).child(
+            dialog.title(format!("{} | {}", t("Structure"), table)).w(px(460.)).child(
                 v_flex()
                     .gap_2()
                     .child(div().text_xs().text_color(theme.muted_foreground).child(t("The SQL is shown before it runs.")))

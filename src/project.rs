@@ -161,11 +161,11 @@ impl Template {
 
     pub fn label(self) -> &'static str {
         match self {
-            Template::C => "C · Makefile",
-            Template::Cpp => "C++ · CMake",
-            Template::Rust => "Rust · Cargo",
-            Template::TypeScript => "TypeScript · Node",
-            Template::Web => "Web · HTML/CSS/JS",
+            Template::C => "C | Makefile",
+            Template::Cpp => "C++ | CMake",
+            Template::Rust => "Rust | Cargo",
+            Template::TypeScript => "TypeScript | Node",
+            Template::Web => "Web | HTML/CSS/JS",
         }
     }
 }
@@ -217,7 +217,7 @@ pub fn create(template: Template, parent: &Path, name: &str) -> Result<(PathBuf,
         std::fs::write(path, content)?;
     }
     // A repository from the start, like `cargo new`; not fatal when git is missing.
-    let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&dir).status();
+    let _ = crate::util::command("git").arg("init").arg("-q").current_dir(&dir).status();
     Ok((dir.clone(), dir.join(files[0].0)))
 }
 

@@ -479,7 +479,7 @@ impl Render for AgentTree {
                     .collect()
             })
             .unwrap_or_default();
-        let title = selected.map(|n| format!("{} · {}", n.role, n.model)).unwrap_or_default();
+        let title = selected.map(|n| format!("{} | {}", n.role, n.model)).unwrap_or_default();
         let (sel_id, sel_running, sel_main) = selected.map_or((None, false, false), |n| (Some(n.id), n.status == Status::Running, n.parent.is_none()));
         let panel_open = self.panel_open;
         let theme = cx.theme();

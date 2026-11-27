@@ -130,8 +130,8 @@ fn run(cmd: &mut Command) -> Result<String> {
 /// rustup's `rust-analyzer` proxy exists even without the component, so ask rustup first.
 fn rust_analyzer() -> Result<PathBuf> {
     if which("rustup").is_some() {
-        let which_ra = || run(Command::new("rustup").args(["which", "rust-analyzer"]));
-        if let Ok(p) = which_ra().or_else(|_| run(Command::new("rustup").args(["component", "add", "rust-analyzer"])).and_then(|_| which_ra())) {
+        let which_ra = || run(crate::util::command("rustup").args(["which", "rust-analyzer"]));
+        if let Ok(p) = which_ra().or_else(|_| run(crate::util::command("rustup").args(["component", "add", "rust-analyzer"])).and_then(|_| which_ra())) {
             return Ok(PathBuf::from(p));
         }
     }
@@ -178,12 +178,12 @@ fn install(program: &str) -> Result<()> {
         // Go's own installer, into ForgeCode's tools.
         "gopls" => {
             let go = which("go").context("Go is not installed (https://go.dev/dl)")?;
-            run(Command::new(go).args(["install", "golang.org/x/tools/gopls@latest"]).env("GOBIN", tools_dir().join("bin"))).map(drop)
+            run(crate::util::command(go).args(["install", "golang.org/x/tools/gopls@latest"]).env("GOBIN", tools_dir().join("bin"))).map(drop)
         }
         _ if npm_packages(program).is_some() => {
             let npm = npm()?;
             let packages = npm_packages(program).unwrap();
-            run(Command::new(npm).arg("install").arg("--prefix").arg(tools_dir().join("node")).args(packages)).map(drop)
+            run(crate::util::command(npm).arg("install").arg("--prefix").arg(tools_dir().join("node")).args(packages)).map(drop)
         }
         _ => bail!("`{program}` is not installed and ForgeCode does not know how to install it"),
     }
@@ -263,7 +263,7 @@ fn java_major(version_output: &str) -> Option<u32> {
 /// downloaded into the tools dir.
 pub fn ensure_java(min: u32) -> Result<PathBuf> {
     if let Some(java) = which("java") {
-        let out = Command::new(&java).arg("-version").env("PATH", search_path()).output()?;
+        let out = crate::util::command(&java).arg("-version").env("PATH", search_path()).output()?;
         // macOS ships a `java` stub that only asks to install Java: it fails here.
         if out.status.success() && java_major(&String::from_utf8_lossy(&out.stderr)).is_some_and(|v| v >= min) {
             return Ok(java);
@@ -365,7 +365,7 @@ fn find_file(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
 /// dotnet-install script into the tools dir.
 fn ensure_dotnet() -> Result<PathBuf> {
     if let Some(dotnet) = which("dotnet") {
-        let sdks = Command::new(&dotnet).arg("--list-sdks").env("PATH", search_path()).output()?;
+        let sdks = crate::util::command(&dotnet).arg("--list-sdks").env("PATH", search_path()).output()?;
         let ok = String::from_utf8_lossy(&sdks.stdout).lines().any(|l| l.split('.').next().and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| m >= 10));
         if ok {
             return Ok(dotnet);
@@ -375,11 +375,11 @@ fn ensure_dotnet() -> Result<PathBuf> {
     if cfg!(windows) {
         let script = tools_dir().join("dotnet-install.ps1");
         std::fs::write(&script, download("https://dot.net/v1/dotnet-install.ps1")?)?;
-        run(Command::new("powershell").args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(&script).args(["-Channel", "10.0", "-InstallDir"]).arg(&dir))?;
+        run(crate::util::command("powershell").args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(&script).args(["-Channel", "10.0", "-InstallDir"]).arg(&dir))?;
     } else {
         let script = tools_dir().join("dotnet-install.sh");
         write_executable(&script, &download("https://dot.net/v1/dotnet-install.sh")?)?;
-        run(Command::new("/bin/sh").arg(&script).args(["--channel", "10.0", "--install-dir"]).arg(&dir))?;
+        run(crate::util::command("/bin/sh").arg(&script).args(["--channel", "10.0", "--install-dir"]).arg(&dir))?;
     }
     which("dotnet").context("dotnet not found after installing the .NET SDK")
 }
@@ -388,7 +388,7 @@ fn ensure_dotnet() -> Result<PathBuf> {
 fn csharp_ls() -> Result<()> {
     let dotnet = ensure_dotnet()?;
     let tools = tools_dir().join("dotnet-tools");
-    run(Command::new(dotnet).args(["tool", "install", "csharp-ls", "--tool-path"]).arg(&tools).envs(dotnet_env())).map(drop)
+    run(crate::util::command(dotnet).args(["tool", "install", "csharp-ls", "--tool-path"]).arg(&tools).envs(dotnet_env())).map(drop)
 }
 
 /// DOTNET_ROOT for .NET tools when the SDK is ForgeCode's own.
@@ -399,7 +399,7 @@ pub fn dotnet_env() -> Vec<(String, String)> {
 
 fn clangd() -> Result<()> {
     #[cfg(target_os = "macos")]
-    if let Ok(p) = run(Command::new("xcrun").args(["--find", "clangd"])) {
+    if let Ok(p) = run(crate::util::command("xcrun").args(["--find", "clangd"])) {
         // Link Xcode's clangd where `which` looks.
         let link = tools_dir().join("bin").join("clangd");
         std::fs::create_dir_all(link.parent().unwrap())?;
@@ -476,9 +476,9 @@ fn unpack_into(archive: &[u8], name: &str, dir: &Path) -> Result<()> {
     let file = dir.join(name);
     std::fs::write(&file, archive)?;
     let result = if name.ends_with(".zip") && cfg!(target_os = "linux") {
-        run(Command::new("unzip").args(["-q", "-o"]).arg(&file).arg("-d").arg(dir))
+        run(crate::util::command("unzip").args(["-q", "-o"]).arg(&file).arg("-d").arg(dir))
     } else {
-        run(Command::new("tar").arg("-xf").arg(&file).arg("-C").arg(dir))
+        run(crate::util::command("tar").arg("-xf").arg(&file).arg("-C").arg(dir))
     };
     let _ = std::fs::remove_file(&file);
     result.map(drop)

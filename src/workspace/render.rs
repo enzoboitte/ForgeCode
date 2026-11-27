@@ -93,7 +93,7 @@ impl Workspace {
                 }
                 for a in state.accounts.clone() {
                     let login = a.login();
-                    let detail = a.info.lock().unwrap().as_ref().map(|i| format!("{login} · {}", i.plan)).unwrap_or(login.clone());
+                    let detail = a.info.lock().unwrap().as_ref().map(|i| format!("{login} | {}", i.plan)).unwrap_or(login.clone());
                     menu = menu.item(PopupMenuItem::new(detail).checked(choice == login).on_click(move |_, _, cx| {
                         let login = login.clone();
                         Settings::update(cx, |s| s.copilot_account = login);
@@ -139,7 +139,7 @@ impl Workspace {
                         .gap_2()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(format!("ForgeCode — {name}"))
+                        .child(format!("ForgeCode - {name}"))
                         .when_some(branch, |el, b| el.child(h_flex().gap_1().child(IconName::GitBranch).child(b))),
                 )
                 // Module commands placed in the title bar, with their own icons.
@@ -544,7 +544,7 @@ impl Workspace {
                                 .child(h_flex().justify_end().child(Button::new("ai-fix-cancel").xsmall().ghost().label(t("Cancel"))
                                     .on_click(cx.listener(move |t, _, w, cx| t.resolve_ai_fix(&p1, true, w, cx))))),
                             super::ai_fix::AiFix::Proposed { original, message, .. } => card
-                                .child(h_flex().gap_1().font_weight(FontWeight::MEDIUM).child(div().text_color(theme.green).child(IconName::Sparkles)).child(t("Fix applied — keep it?")))
+                                .child(h_flex().gap_1().font_weight(FontWeight::MEDIUM).child(div().text_color(theme.green).child(IconName::Sparkles)).child(t("Fix applied - keep it?")))
                                 .child(div().text_color(theme.muted_foreground).line_clamp(2).child(message))
                                 // What was there before, struck out in red.
                                 .child(
@@ -1089,9 +1089,12 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(Self::add_selection_to_chat))
             .on_action(cx.listener(Self::quick_open))
-            .on_action(|_: &ToggleTheme, _, cx| Settings::update(cx, |s| {
-                s.theme_mode = if s.theme_mode == "light" { "dark".into() } else { "light".into() };
-            }))
+            // From what is shown: in "system" mode the setting alone doesn't say (a light system
+            // made the first click switch light to light).
+            .on_action(|_: &ToggleTheme, _, cx| {
+                let dark = cx.theme().is_dark();
+                Settings::update(cx, |s| s.theme_mode = if dark { "light".into() } else { "dark".into() })
+            })
             .child(title_bar)
             .child(
                 // flex_1 + min_h_0: the panels take the remaining height and never push the status bar out.

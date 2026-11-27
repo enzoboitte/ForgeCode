@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
@@ -51,7 +51,7 @@ pub fn check(path: &Path) -> Result<String, String> {
     if !path.is_file() {
         return Err(t("File not found").into());
     }
-    let mut child = Command::new(path)
+    let mut child = crate::util::command(path)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -320,7 +320,7 @@ impl Render for RuntimeField {
         let theme = cx.theme().clone();
         let automatic_mode = self.configured(cx).is_empty();
         let (path, status) = self.current.clone().unwrap_or((PathBuf::new(), Status::Checking));
-        let title = if automatic_mode { format!("{} — {}", t("Automatic"), self.label(&path)) } else { self.label(&path) };
+        let title = if automatic_mode { format!("{} - {}", t("Automatic"), self.label(&path)) } else { self.label(&path) };
         let found = self.found.clone();
         let view = cx.entity().downgrade();
         let labels: Vec<String> = found.iter().map(|(p, _)| self.label(p)).collect();

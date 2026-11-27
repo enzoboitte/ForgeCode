@@ -4,7 +4,7 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
@@ -33,7 +33,7 @@ pub struct Info {
 
 /// Size, length and frame rate from ffprobe.
 pub fn probe(path: &Path) -> Result<Info, String> {
-    let out = Command::new("ffprobe")
+    let out = crate::util::command("ffprobe")
         .args(["-v", "error", "-show_entries", "stream=codec_type,width,height,avg_frame_rate:format=duration", "-of", "json"])
         .arg(path)
         .output()
@@ -62,7 +62,7 @@ pub fn probe(path: &Path) -> Result<Info, String> {
 
 /// ffmpeg writing frames from `at` seconds: at the video's pace when `live`, else just one.
 fn decoder(path: &Path, info: &Info, at: f64, live: bool) -> std::io::Result<Child> {
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = crate::util::command("ffmpeg");
     cmd.args(["-v", "error", "-nostdin"]);
     if live {
         cmd.arg("-re");
@@ -154,7 +154,7 @@ impl VideoView {
         let Some(mut stdout) = decoder.stdout.take() else { return };
         self.decoder = Some(decoder);
         if info.audio {
-            self.audio = Command::new("ffplay")
+            self.audio = crate::util::command("ffplay")
                 .args(["-v", "error", "-nodisp", "-autoexit", "-vn", "-ss", &format!("{start:.3}")])
                 .arg(&self.path)
                 .stdin(Stdio::null())
@@ -326,12 +326,12 @@ mod tests {
     #[test]
     fn probes_and_decodes_a_clip() {
         assert!(is_video("a/b.MP4".as_ref()) && !is_video("a.png".as_ref()));
-        if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
+        if crate::util::command("ffmpeg").arg("-version").output().is_err() {
             eprintln!("ffmpeg not installed: skipped");
             return;
         }
         let path = std::env::temp_dir().join(format!("forgecode-clip-{}.mp4", std::process::id()));
-        let made = std::process::Command::new("ffmpeg")
+        let made = crate::util::command("ffmpeg")
             .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=1", "-pix_fmt", "yuv420p"])
             .arg(&path)
             .status()
@@ -351,11 +351,11 @@ mod tests {
     #[gpui_kit::test]
     fn plays_pauses_and_seeks(cx: &mut gpui_kit::TestAppContext) {
         use gpui_kit::AppContext as _;
-        if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
+        if crate::util::command("ffmpeg").arg("-version").output().is_err() {
             return;
         }
         let path = std::env::temp_dir().join(format!("forgecode-play-{}.mp4", std::process::id()));
-        let made = std::process::Command::new("ffmpeg")
+        let made = crate::util::command("ffmpeg")
             .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=20:duration=3", "-pix_fmt", "yuv420p"])
             .arg(&path)
             .status()

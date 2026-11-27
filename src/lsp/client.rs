@@ -283,7 +283,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         // macOS: /var is /private/var; the app opens canonical paths too.
         let root = root.canonicalize().unwrap();
-        let ok = std::process::Command::new("python3").args(["-m", "venv", ".venv"]).current_dir(&root).status().unwrap();
+        let ok = crate::util::command("python3").args(["-m", "venv", ".venv"]).current_dir(&root).status().unwrap();
         assert!(ok.success());
         let site = std::fs::read_dir(root.join(".venv/lib")).unwrap().next().unwrap().unwrap().path().join("site-packages/mylib");
         std::fs::create_dir_all(&site).unwrap();

@@ -13,17 +13,31 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A program to run, without a console window on Windows: ForgeCode is a window app there, and
+/// each program it starts (git, gh, language servers, Python…) would otherwise open one.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// A command running `script` through the platform shell (`sh -c` or `cmd /C`).
 pub fn shell_command(script: &str) -> std::process::Command {
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
+        let mut c = command("cmd");
         c.arg("/C");
         c
     };
     #[cfg(not(windows))]
     let mut cmd = {
-        let mut c = std::process::Command::new("sh");
+        let mut c = command("sh");
         c.arg("-c");
         c
     };
@@ -43,7 +57,7 @@ pub fn path_with(dirs: impl IntoIterator<Item = std::path::PathBuf>) -> String {
 #[cfg(unix)]
 pub fn adopt_login_path() {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let Ok(mut child) = std::process::Command::new(shell)
+    let Ok(mut child) = crate::util::command(shell)
         .args(["-l", "-c", "printf %s \"$PATH\""])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

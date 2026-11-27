@@ -3,7 +3,6 @@
 //! already holds the user's sign-in.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -56,7 +55,7 @@ impl Run {
 /// `gh` in the repository, its output or its error message.
 fn gh(root: &Path, args: &[&str]) -> Result<String> {
     // Found where Homebrew & co. put it, even when the app was started from the Dock.
-    let out = Command::new(crate::lsp::install::which("gh").unwrap_or_else(|| "gh".into()))
+    let out = crate::util::command(crate::lsp::install::which("gh").unwrap_or_else(|| "gh".into()))
         .args(args)
         .current_dir(root)
         .output()
@@ -280,7 +279,7 @@ impl ActionsView {
                             .flex_1()
                             .min_w_0()
                             .child(div().text_sm().truncate().child(run.display_title.clone()))
-                            .child(div().text_xs().truncate().text_color(theme.muted_foreground).child(format!("{} · {} · {}", run.workflow_name, run.head_branch, ago(&run.created_at)))),
+                            .child(div().text_xs().truncate().text_color(theme.muted_foreground).child(format!("{} | {} | {}", run.workflow_name, run.head_branch, ago(&run.created_at)))),
                     )
                     .child(
                         h_flex()

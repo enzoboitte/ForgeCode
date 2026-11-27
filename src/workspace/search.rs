@@ -222,7 +222,7 @@ impl Render for SearchPanel {
                     .child(div().text_xs().text_color(theme.muted_foreground).child(match (&self.error, self.busy) {
                         (Some(e), _) => e.clone(),
                         (None, true) => "…".into(),
-                        (None, false) if total > 0 => format!("{total} {} · {} {}", t("results"), self.results.len(), t("files")),
+                        (None, false) if total > 0 => format!("{total} {} | {} {}", t("results"), self.results.len(), t("files")),
                         _ => String::new(),
                     })),
             )

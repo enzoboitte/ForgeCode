@@ -187,7 +187,7 @@ assert c.add_requirement('[generators]\\nCMakeDeps\\n', 'zlib/1.3').startswith('
 assert c.version_key('1.10.2') > c.version_key('1.9.9')
 assert c.requirements('[requires]\\nsfml/2.6.1 # rendu\\nfmt/10.2.1\\n[generators]\\nX\\n') == ['sfml/2.6.1', 'fmt/10.2.1']
 assert c.requirements(c.remove_requirement(r, 'sfml')) == ['fmt/10.2.1']";
-        let Ok(out) = std::process::Command::new("python3").args(["-c", script]).arg(&dir).output() else { return eprintln!("no python3: skipped") };
+        let Ok(out) = crate::util::command("python3").args(["-c", script]).arg(&dir).output() else { return eprintln!("no python3: skipped") };
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     }
 }

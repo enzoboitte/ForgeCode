@@ -139,7 +139,7 @@ impl ProvidersView {
         let mut inputs = vec![];
         for i in 0..FIELDS.len() {
             let hint = match field(&auto, i) {
-                Some(v) => format!("auto · {v}"),
+                Some(v) => format!("auto | {v}"),
                 None => t("not sent").to_string(),
             };
             let value = field(&p.sampling, i).unwrap_or_default();
@@ -205,7 +205,7 @@ impl Render for ProvidersView {
                         v_flex()
                             .flex_1()
                             .child(div().text_sm().child(p.name.clone()))
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} · {} {}", p.base_url, p.models.len(), t("models")))),
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} | {} {}", p.base_url, p.models.len(), t("models")))),
                     )
                     .child(Button::new(SharedString::from(format!("tune-{id}"))).ghost().xsmall().icon(IconName::Settings2).tooltip(t("Generation settings"))
                         .when(open.is_some(), |b| b.primary())

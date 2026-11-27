@@ -2262,6 +2262,23 @@ mod ui_tests {
         assert_ne!(state(cx).0, "fn go(arg) {}");
     }
 
+    /// The theme button switches what is shown, even in "system" mode with a light system.
+    #[gpui_kit::test]
+    fn the_theme_button_switches_what_is_shown(cx: &mut TestAppContext) {
+        let (_ws, cx) = setup(cx);
+        let dark = |cx: &mut gpui_kit::VisualTestContext| cx.update(|_, cx| gpui_kit::component::ActiveTheme::theme(cx).is_dark());
+        cx.update(|_, cx| crate::settings::Settings::update(cx, |s| s.theme_mode = "light".into()));
+        // As in "system" mode when the system is light: the setting doesn't say "light".
+        cx.update(|_, cx| crate::settings::Settings::update(cx, |s| s.theme_mode = "system".into()));
+        let before = dark(cx);
+        cx.update(|window, cx| window.dispatch_action(Box::new(super::ToggleTheme), cx));
+        cx.run_until_parked();
+        assert_ne!(dark(cx), before, "one click switches the theme");
+        cx.update(|window, cx| window.dispatch_action(Box::new(super::ToggleTheme), cx));
+        cx.run_until_parked();
+        assert_eq!(dark(cx), before, "and back");
+    }
+
     /// On a fresh start nothing else has the focus: the workspace takes it, so the menu bar's
     /// commands (File, Edit…) are enabled.
     #[gpui_kit::test]
@@ -2774,7 +2791,7 @@ while True:
         let dir = std::env::temp_dir().join(format!("forgecode-checkout-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap().status.success(), "{args:?}");
+        let git = |args: &[&str]| assert!(crate::util::command("git").args(args).current_dir(&dir).output().unwrap().status.success(), "{args:?}");
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "t@t"]);
         git(&["config", "user.name", "t"]);

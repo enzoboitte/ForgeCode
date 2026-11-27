@@ -212,8 +212,7 @@ pub fn settings_view(cx: &App) -> SettingsView {
         .group(SettingGroup::new().items([SettingItem::render(|_, _, cx| modules_list(cx))]))
         .group(
             SettingGroup::new().title(t("Marketplace")).items([
-                SettingItem::new(t("Marketplace folder"), text_field!(marketplace_dir))
-                    .description(t("Extensions are read from this folder (empty: the default one). Copy an extension folder there to publish it.")),
+                SettingItem::new(t("Marketplace folder"), text_field!(marketplace_dir)),
                 SettingItem::render(|_, window, cx| super::marketplace::view(window, cx)),
             ]),
         );
@@ -334,7 +333,7 @@ fn copilot_accounts(cx: &mut App) -> AnyElement {
                                     .child(div().font_weight(FontWeight::MEDIUM).child(login.clone()))
                                     .when_some(info.as_ref().filter(|i| !i.name.is_empty()), |el, i| el.child(div().text_color(muted).child(i.name.clone()))))
                                 .child(div().text_xs().text_color(muted).child(match &info {
-                                    Some(i) => format!("Copilot {}{}{}", i.plan, if i.reset_date.is_empty() { String::new() } else { format!(" · {} {}", t("resets"), i.reset_date) }, if a.cooling_down() { format!(" · {}", t("rate limited")) } else { String::new() }),
+                                    Some(i) => format!("Copilot {}{}{}", i.plan, if i.reset_date.is_empty() { String::new() } else { format!(" | {} {}", t("resets"), i.reset_date) }, if a.cooling_down() { format!(" | {}", t("rate limited")) } else { String::new() }),
                                     None => t("Loading…").into(),
                                 })),
                         )

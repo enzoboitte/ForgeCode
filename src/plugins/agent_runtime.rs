@@ -38,7 +38,7 @@ pub fn system_program(spec: &AgentSpec) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let found = which(name).or_else(|| home.map(|h| h.join(".local/bin").join(name)).filter(|p| p.is_file()))?;
     // `<agent> acp --version` fails when its ACP extra isn't installed.
-    let mut check = Command::new(&found);
+    let mut check = crate::util::command(&found);
     check.args(spec.command[1..].iter()).arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     check.status().ok().filter(|s| s.success()).map(|_| found)
 }
@@ -55,9 +55,9 @@ pub fn is_installed(plugin: &Plugin, spec: &AgentSpec) -> bool {
 /// Whether process `pid` is still running.
 fn alive(pid: u32) -> bool {
     if cfg!(windows) {
-        Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        crate::util::command("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
     } else {
-        Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+        crate::util::command("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
     }
 }
 
@@ -93,7 +93,7 @@ c.commit()
 print(n)
 "#;
     if db.is_file() && python.is_file() {
-        let _ = Command::new(python).arg("-c").arg(SCRIPT).arg(db).arg(base_url).stdin(Stdio::null()).output();
+        let _ = crate::util::command(python).arg("-c").arg(SCRIPT).arg(db).arg(base_url).stdin(Stdio::null()).output();
     }
 }
 
@@ -112,14 +112,14 @@ pub fn stop_orphan(plugin: &Plugin) -> Option<u32> {
         return None;
     }
     // Only if that pid is still the agent (pids are reused).
-    let command = Command::new("ps").args(["-o", "command=", "-p", &agent.to_string()]).output().ok()?;
+    let command = crate::util::command("ps").args(["-o", "command=", "-p", &agent.to_string()]).output().ok()?;
     if !String::from_utf8_lossy(&command.stdout).contains(&runtime_dir(plugin).display().to_string()) {
         return None;
     }
     let _ = if cfg!(windows) {
-        Command::new("taskkill").args(["/F", "/PID", &agent.to_string()]).status()
+        crate::util::command("taskkill").args(["/F", "/PID", &agent.to_string()]).status()
     } else {
-        Command::new("kill").arg(agent.to_string()).status()
+        crate::util::command("kill").arg(agent.to_string()).status()
     };
     Some(agent)
 }
@@ -193,7 +193,7 @@ fn install_now(plugin: &Plugin, spec: &AgentSpec, runtime: &Path, progress: &mut
     std::fs::create_dir_all(runtime)?;
     progress("uv…");
     let uv = uv()?;
-    let mut child = Command::new(uv)
+    let mut child = crate::util::command(uv)
         .args(["tool", "install", "--force", "--python", &spec.python, &spec.package])
         .envs(uv_env(runtime))
         .env("PATH", crate::lsp::install::search_path())
@@ -246,9 +246,9 @@ fn run_streaming(mut cmd: Command, progress: &mut impl FnMut(&str)) -> Result<St
                 if last_output.lock().unwrap().elapsed() > STALL {
                     killed.store(true, std::sync::atomic::Ordering::Relaxed);
                     let _ = if cfg!(windows) {
-                        Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).status()
+                        crate::util::command("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).status()
                     } else {
-                        Command::new("kill").arg(pid.to_string()).status()
+                        crate::util::command("kill").arg(pid.to_string()).status()
                     };
                     break;
                 }
@@ -319,7 +319,7 @@ fn install_source(plugin: &Plugin, spec: &AgentSpec, source: &str, runtime: &Pat
         let args: Vec<String> = step.iter().map(|a| expand(a, &uv, &spec.python, &src)).collect();
         let Some((program, args)) = args.split_first() else { continue };
         progress(&format!("$ {} {}", Path::new(program).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), args.join(" ")));
-        let mut c = Command::new(program);
+        let mut c = crate::util::command(program);
         c.args(args)
             .current_dir(&src)
             // uv's Pythons and cache stay in ForgeCode's folders.
@@ -337,7 +337,7 @@ fn install_source(plugin: &Plugin, spec: &AgentSpec, source: &str, runtime: &Pat
     }
     if let Some((program, args)) = spec.environment.split_first() {
         let program = expand(program, &uv, &spec.python, &src);
-        let mut c = Command::new(program);
+        let mut c = crate::util::command(program);
         c.args(args.iter().map(|a| expand(a, &uv, &spec.python, &src))).current_dir(&src).env("PYTHONPATH", &src).env("HERMES_HOME", agent_home(plugin));
         let json = run_streaming(c, &mut |_| {})?;
         // Only the last line is the JSON object (a tool may log before it).
@@ -376,11 +376,11 @@ pub fn ensure_python(plugin: &Plugin, spec: &super::PythonSpec, mut progress: im
     }
     std::fs::create_dir_all(&runtime)?;
     let uv = uv()?;
-    let mut venv = Command::new(&uv);
+    let mut venv = crate::util::command(&uv);
     venv.args(["venv", "--allow-existing", "--python", &spec.version]).arg(runtime.join("venv")).envs(uv_env(&runtime)).env("PATH", crate::lsp::install::search_path());
     run_streaming(venv, &mut progress)?;
     if !spec.packages.is_empty() {
-        let mut pip = Command::new(&uv);
+        let mut pip = crate::util::command(&uv);
         pip.args(["pip", "install", "--python"]).arg(&python).args(&spec.packages).envs(uv_env(&runtime)).env("PATH", crate::lsp::install::search_path());
         run_streaming(pip, &mut progress)?;
     }
@@ -514,7 +514,7 @@ mod tests {
         }
         let gone = Gone;
         // Not this module's agent: left alone even though its owner is dead.
-        let mut other = Command::new("sleep").arg("5").spawn().unwrap();
+        let mut other = crate::util::command("sleep").arg("5").spawn().unwrap();
         std::fs::write(runtime_dir(&plugin).join("agent.pid"), format!("{} {}", other.id(), gone.id())).unwrap();
         assert_eq!(stop_orphan(&plugin), None);
         other.kill().unwrap();
@@ -522,12 +522,12 @@ mod tests {
         // The module's agent (run from its runtime folder) whose owner is dead: stopped.
         let fake = runtime_dir(&plugin).join("sleep");
         std::fs::copy("/bin/sleep", &fake).unwrap();
-        let mut agent = Command::new(&fake).arg("5").spawn().unwrap();
+        let mut agent = crate::util::command(&fake).arg("5").spawn().unwrap();
         std::fs::write(runtime_dir(&plugin).join("agent.pid"), format!("{} {}", agent.id(), gone.id())).unwrap();
         assert_eq!(stop_orphan(&plugin), Some(agent.id()));
         assert!(!agent.wait().unwrap().success(), "killed");
         // Owned by this ForgeCode: never stopped.
-        let mut mine = Command::new(&fake).arg("5").spawn().unwrap();
+        let mut mine = crate::util::command(&fake).arg("5").spawn().unwrap();
         record_agent(&plugin, mine.id());
         assert_eq!(stop_orphan(&plugin), None);
         mine.kill().unwrap();
@@ -541,7 +541,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("state.db");
         let py = Path::new("/usr/bin/python3");
-        let run = |code: &str| String::from_utf8(Command::new(py).args(["-c", code]).arg(&db).output().unwrap().stdout).unwrap();
+        let run = |code: &str| String::from_utf8(crate::util::command(py).args(["-c", code]).arg(&db).output().unwrap().stdout).unwrap();
         run("import sqlite3,sys,json; c=sqlite3.connect(sys.argv[1]); c.execute('create table sessions(id text, model_config text, billing_base_url text)'); c.execute('insert into sessions values (?,?,?)', ('a', json.dumps({'base_url':'http://127.0.0.1:57550/v1','cwd':'/p'}), 'http://127.0.0.1:57550/v1')); c.execute('insert into sessions values (?,?,?)', ('b', json.dumps({'base_url':'https://api.example.com/v1'}), None)); c.commit()");
         repoint_db(py, &db, "http://127.0.0.1:59071/v1");
         let out = run("import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select id, model_config, billing_base_url from sessions order by id').fetchall())");
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(installer(&runtime), None);
         std::fs::write(runtime.join(".installing"), std::process::id().to_string()).unwrap();
         assert_eq!(installer(&runtime), None, "our own lock");
-        let mut other = Command::new("sleep").arg("5").spawn().unwrap();
+        let mut other = crate::util::command("sleep").arg("5").spawn().unwrap();
         std::fs::write(runtime.join(".installing"), other.id().to_string()).unwrap();
         assert_eq!(installer(&runtime), Some(other.id()), "another live process");
         other.kill().unwrap();

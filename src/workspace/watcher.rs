@@ -100,12 +100,18 @@ impl Workspace {
 /// Virtualenvs are left out separately, found once when watching starts.
 fn ignored_quick(path: &Path, root: &Path) -> bool {
     let rel = path.strip_prefix(root).unwrap_or(path);
-    rel.components().any(|c| {
-        let name = c.as_os_str().to_string_lossy();
-        matches!(name.as_ref(), "target" | "node_modules" | "__pycache__" | ".mypy_cache" | ".pytest_cache" | ".ruff_cache" | "dist" | ".next")
+    let names: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    // Inside .git only a branch switch or a new commit matters (HEAD, refs). The rest is git's
+    // own bookkeeping, which `git status` itself rewrites (`.git/index`, every time on Windows):
+    // reacting to it refreshed Git endlessly. Found by name, as the root may not prefix the path
+    // (Windows reports `C:\…` for a root opened as `\\?\C:\…`).
+    if let Some(i) = names.iter().position(|n| n == ".git") {
+        return !matches!(names.get(i + 1).map(String::as_str), Some("HEAD" | "refs" | "packed-refs"));
+    }
+    names.iter().any(|name| {
+        matches!(name.as_str(), "target" | "node_modules" | "__pycache__" | ".mypy_cache" | ".pytest_cache" | ".ruff_cache" | "dist" | ".next")
             || name.ends_with(".pyc")
-    }) || rel.starts_with(".git/objects")
-        || rel.starts_with(".git/logs")
+    })
 }
 
 #[cfg(test)]
@@ -121,5 +127,13 @@ mod tests {
         assert!(ignored(Path::new("/p/.git/objects/ab/cd"), root));
         assert!(!ignored(Path::new("/p/backend/docker-compose.yml"), root));
         assert!(!ignored(Path::new("/p/.git/HEAD"), root), "branch switches refresh git");
+        assert!(!ignored(Path::new("/p/.git/refs/heads/main"), root), "new commits too");
+        // What `git status` rewrites itself: reacting to it looped.
+        assert!(ignored(Path::new("/p/.git/index"), root));
+        assert!(ignored(Path::new("/p/.git/index.lock"), root));
+        assert!(ignored(Path::new("/p/.git/FETCH_HEAD"), root));
+        // A root that doesn't prefix the reported path (Windows' \\?\ form): still found.
+        assert!(ignored(Path::new("/elsewhere/p/.git/index"), Path::new("/other/p")));
+        assert!(ignored(Path::new("/elsewhere/p/target/x"), Path::new("/other/p")));
     }
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,7 +55,7 @@ impl DapClient {
     pub fn start_tcp(argv: &[String], cwd: &Path, port: u16, events: smol::channel::Sender<DapEvent>) -> Result<Arc<Self>> {
         let argv: Vec<String> = argv.iter().map(|a| a.replace("{port}", &port.to_string())).collect();
         let (program, args) = argv.split_first().context("empty adapter command")?;
-        let child = Command::new(program)
+        let child = crate::util::command(program)
             .args(args)
             .current_dir(cwd)
             .env("PATH", crate::lsp::install::search_path())
@@ -163,7 +163,7 @@ fn handle_incoming(msg: Value, pending: &Pending, writer: Option<&Writer>, event
 /// The debug adapter command line: `lldb-dap` from Xcode (macOS) or PATH (`lldb-vscode` on older LLVM).
 pub fn adapter_command() -> Vec<String> {
     #[cfg(target_os = "macos")]
-    if let Ok(out) = std::process::Command::new("xcrun").args(["-f", "lldb-dap"]).output() {
+    if let Ok(out) = crate::util::command("xcrun").args(["-f", "lldb-dap"]).output() {
         if out.status.success() {
             return vec![String::from_utf8_lossy(&out.stdout).trim().to_string()];
         }
@@ -199,7 +199,7 @@ not json
     #[test]
     fn lldb_dap_stops_at_breakpoint() {
         let adapter = adapter_command();
-        if std::process::Command::new(&adapter[0]).arg("--help").output().is_err() {
+        if crate::util::command(&adapter[0]).arg("--help").output().is_err() {
             return eprintln!("lldb-dap not installed, skipping");
         }
         let dir = std::env::temp_dir().join(format!("forge-dap-{}", std::process::id()));

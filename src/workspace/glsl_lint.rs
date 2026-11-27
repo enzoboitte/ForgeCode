@@ -3,7 +3,7 @@
 
 use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::Result;
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
@@ -54,7 +54,7 @@ pub fn parse(output: &str) -> Vec<Diagnostic> {
 /// Check `text` (the editor's, saved or not) as the shader `path`.
 pub fn lint(path: &Path, text: &str) -> Result<Vec<Diagnostic>> {
     let glslang = crate::lsp::install::ensure_glslang()?;
-    let mut child = Command::new(glslang)
+    let mut child = crate::util::command(glslang)
         .args(["-S", stage(path), "--stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

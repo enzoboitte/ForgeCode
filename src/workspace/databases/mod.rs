@@ -1,5 +1,5 @@
 //! The databases module (extensions/databases): connections of the project, the engine process
-//! (`db.py serve`, every SQL DBMS through Python drivers) and the views on it — the sidebar panel,
+//! (`db.py serve`, every SQL DBMS through Python drivers) and the views on it - the sidebar panel,
 //! table and SQL console tabs.
 
 pub mod console;
@@ -9,7 +9,7 @@ pub mod table;
 use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -129,13 +129,13 @@ pub fn is_sqlite(path: &Path) -> bool {
 /// which `.forgecode/.gitignore` keeps out of git.
 pub mod secret {
     use std::path::Path;
-    use std::process::Command;
+    
 
     const SERVICE: &str = "forgecode-db";
 
     pub fn set(root: &Path, id: &str, password: &str) {
         if cfg!(target_os = "macos") {
-            let _ = Command::new("security").args(["add-generic-password", "-U", "-a", id, "-s", SERVICE, "-w", password]).output();
+            let _ = crate::util::command("security").args(["add-generic-password", "-U", "-a", id, "-s", SERVICE, "-w", password]).output();
             return;
         }
         let path = file(root);
@@ -147,7 +147,7 @@ pub mod secret {
 
     pub fn get(root: &Path, id: &str) -> String {
         if cfg!(target_os = "macos") {
-            return Command::new("security")
+            return crate::util::command("security")
                 .args(["find-generic-password", "-a", id, "-s", SERVICE, "-w"])
                 .output()
                 .ok()
@@ -164,7 +164,7 @@ pub mod secret {
 
     pub fn remove(root: &Path, id: &str) {
         if cfg!(target_os = "macos") {
-            let _ = Command::new("security").args(["delete-generic-password", "-a", id, "-s", SERVICE]).output();
+            let _ = crate::util::command("security").args(["delete-generic-password", "-a", id, "-s", SERVICE]).output();
         }
         let _ = root;
     }
@@ -202,7 +202,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn start(python: &Path, script: &Path) -> Result<Arc<Self>> {
-        let mut child = Command::new(python)
+        let mut child = crate::util::command(python)
             .arg(script)
             .arg("serve")
             .stdin(Stdio::piped())
@@ -496,7 +496,7 @@ pub fn confirm_agent_change(request: Value, answer: smol::channel::Sender<bool>,
         let (yes, no) = (answer.clone(), answer.clone());
         let (a1, a2) = (answered.clone(), answered.clone());
         dialog
-            .title(format!("{} · {connection}", crate::i18n::t("Hermes wants to change the database")))
+            .title(format!("{} | {connection}", crate::i18n::t("Hermes wants to change the database")))
             .w(px(560.))
             .on_close({
                 let answer = answer.clone();
@@ -562,7 +562,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("app.db");
-        let ok = std::process::Command::new("/usr/bin/python3")
+        let ok = crate::util::command("/usr/bin/python3")
             .args(["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.executescript('create table t(id integer primary key, name text); insert into t(name) values (\"a\"),(\"b\");'); c.commit()"])
             .arg(&db)
             .status()

@@ -3,7 +3,7 @@
 //! node; delegated sub-agents are its children.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
@@ -63,7 +63,7 @@ pub fn read_rows(python: &Path, db: &Path) -> Result<Vec<Row>> {
     if !db.is_file() {
         return Ok(vec![]);
     }
-    let out = Command::new(python).arg("-c").arg(QUERY).arg(db).stdin(Stdio::null()).output().context("read Hermes sessions")?;
+    let out = crate::util::command(python).arg("-c").arg(QUERY).arg(db).stdin(Stdio::null()).output().context("read Hermes sessions")?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("sqlite error"));
     }

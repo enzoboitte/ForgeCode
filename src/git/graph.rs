@@ -444,7 +444,7 @@ impl Render for GitGraph {
                     .border_b_1()
                     .border_color(border)
                     .child(div().child(IconName::Network))
-                    .child(div().text_sm().flex_1().child(format!("{} — {} {}", t("History"), commits.len(), t("commits"))))
+                    .child(div().text_sm().flex_1().child(format!("{} - {} {}", t("History"), commits.len(), t("commits"))))
                     .child(Button::new("graph-reload").ghost().xsmall().icon(IconName::RefreshCw).on_click(cx.listener(|t, _, _, cx| {
                         t.scroll_to_end = true;
                         t.reload(cx)
@@ -534,7 +534,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str], input: Option<&str>| {
             use std::io::Write as _;
-            let mut child = std::process::Command::new("git").args(args).current_dir(&dir).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
+            let mut child = crate::util::command("git").args(args).current_dir(&dir).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
             if let Some(input) = input {
                 child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
             }

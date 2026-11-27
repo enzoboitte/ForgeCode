@@ -6,7 +6,6 @@ pub mod graph;
 pub mod panel;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Result, bail};
 
@@ -113,7 +112,7 @@ pub struct Repo {
 impl Repo {
     /// The repository containing `dir`, if any.
     pub fn discover(dir: &Path) -> Option<Repo> {
-        let out = Command::new("git").args(["rev-parse", "--show-toplevel"]).current_dir(dir).output().ok()?;
+        let out = crate::util::command("git").args(["rev-parse", "--show-toplevel"]).current_dir(dir).output().ok()?;
         out.status.success().then(|| Repo { root: PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()) })
     }
 
@@ -348,7 +347,7 @@ impl Repo {
     pub fn diff_file(&self, file: &FileStatus, staged: bool) -> Result<String> {
         if file.untracked() {
             // `--no-index` exits with 1 when files differ.
-            let out = Command::new("git").args(["diff", "--no-index", "--", "/dev/null", &file.path]).current_dir(&self.root).output()?;
+            let out = crate::util::command("git").args(["diff", "--no-index", "--", "/dev/null", &file.path]).current_dir(&self.root).output()?;
             return Ok(String::from_utf8_lossy(&out.stdout).to_string());
         }
         if staged { self.git(&["diff", "--cached", "--", &file.path]) } else { self.git(&["diff", "--", &file.path]) }
@@ -382,7 +381,7 @@ impl Repo {
 }
 
 fn run(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").args(args).current_dir(dir).env("GIT_TERMINAL_PROMPT", "0").output()?;
+    let out = crate::util::command("git").args(args).current_dir(dir).env("GIT_TERMINAL_PROMPT", "0").output()?;
     if !out.status.success() {
         bail!("git {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
     }

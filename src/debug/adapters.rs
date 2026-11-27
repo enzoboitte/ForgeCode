@@ -64,10 +64,10 @@ pub fn command(adapter: Adapter, settings: &LangSettings, root: &Path) -> Result
         Adapter::Python => {
             let venv = tools_dir().join("debugpy");
             let python = venv_python(&venv);
-            if !python.is_file() || run(Command::new(&python).args(["-c", "import debugpy"])).is_err() {
+            if !python.is_file() || run(crate::util::command(&python).args(["-c", "import debugpy"])).is_err() {
                 let base = python_interpreter(settings, root).context("Python is not installed (python3 / python)")?;
-                run(Command::new(&base).args(["-m", "venv"]).arg(&venv))?;
-                run(Command::new(&python).args(["-m", "pip", "install", "--quiet", "debugpy"]))?;
+                run(crate::util::command(&base).args(["-m", "venv"]).arg(&venv))?;
+                run(crate::util::command(&python).args(["-m", "pip", "install", "--quiet", "debugpy"]))?;
             }
             (vec![python.display().to_string(), "-m".into(), "debugpy.adapter".into()], false)
         }
@@ -88,7 +88,7 @@ pub fn command(adapter: Adapter, settings: &LangSettings, root: &Path) -> Result
                 crate::lsp::install::unpack_url_into(&url, "php-debug.zip", &dir)?;
             }
             let php = if settings.runtime.is_empty() { "php".to_string() } else { settings.runtime.clone() };
-            let modules = run(Command::new(&php).arg("-m")).context("PHP is not installed")?;
+            let modules = run(crate::util::command(&php).arg("-m")).context("PHP is not installed")?;
             if !modules.to_lowercase().contains("xdebug") {
                 bail!("PHP debugging needs the Xdebug extension: install it (`pecl install xdebug`, or your package manager / https://xdebug.org/wizard), then enable xdebug.mode=debug");
             }
@@ -97,7 +97,7 @@ pub fn command(adapter: Adapter, settings: &LangSettings, root: &Path) -> Result
         Adapter::Go => {
             if which("dlv").is_none() {
                 let go = which("go").context("Go is not installed")?;
-                run(Command::new(go).args(["install", "github.com/go-delve/delve/cmd/dlv@latest"]).env("GOBIN", tools_dir().join("bin")))?;
+                run(crate::util::command(go).args(["install", "github.com/go-delve/delve/cmd/dlv@latest"]).env("GOBIN", tools_dir().join("bin")))?;
             }
             let dlv = which("dlv").context("dlv not found after installing it")?;
             (vec![dlv.display().to_string(), "dap".into(), "--listen=127.0.0.1:{port}".into()], true)

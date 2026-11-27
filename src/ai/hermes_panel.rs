@@ -892,7 +892,7 @@ impl HermesPanel {
                         client.answer_permission(&request, Some(&allow.id));
                         self.entries.push(Entry::Tool {
                             id: String::new(),
-                            title: format!("{} · $ {command}", t("Allowed automatically (safe)")),
+                            title: format!("{} | $ {command}", t("Allowed automatically (safe)")),
                             kind: "execute".into(),
                             status: "completed".into(),
                             output: String::new(),
@@ -1253,12 +1253,12 @@ impl HermesPanel {
             };
             let branch = if depth == 0 { String::new() } else { format!("{}{} ", "   ".repeat(depth - 1), if last { "└─" } else { "├─" }) };
             let stats = format!(
-                "{state} · {} msg · {} {} · {}k tok{}",
+                "{state} | {} msg | {} {} | {}k tok{}",
                 node.messages,
                 node.tools,
                 t("tools"),
                 node.tokens / 1000,
-                if node.compressions > 0 { format!(" · ⟳{}", node.compressions) } else { String::new() }
+                if node.compressions > 0 { format!(" | ⟳{}", node.compressions) } else { String::new() }
             );
             let id = node.id.clone();
             let root_node = depth == 0;
@@ -1467,7 +1467,7 @@ impl Render for HermesPanel {
                             })))
                     }))
                     .when(self.editing.is_some(), |el| {
-                        el.child(div().px_1().text_xs().text_color(theme.muted_foreground).child(t("Editing a queued message: ↵ save · ⌘↵ send now · Esc cancel")))
+                        el.child(div().px_1().text_xs().text_color(theme.muted_foreground).child(t("Editing a queued message: ↵ save | ⌘↵ send now | Esc cancel")))
                     })
                     .when(!attachments.is_empty(), |el| {
                         el.child(h_flex().flex_wrap().gap_1().children(attachments.iter().enumerate().map(|(i, p)| {
@@ -1543,13 +1543,13 @@ impl Render for HermesPanel {
                                     for (id, name, desc) in modes.clone() {
                                         let view = view.clone();
                                         let checked = current == id;
-                                        menu = menu.item(PopupMenuItem::new(format!("{name} — {desc}")).checked(checked).on_click(move |_, _, cx| {
+                                        menu = menu.item(PopupMenuItem::new(format!("{name} - {desc}")).checked(checked).on_click(move |_, _, cx| {
                                             let _ = view.update(cx, |t, cx| t.set_mode(id.clone(), cx));
                                         }));
                                     }
                                     let view = view.clone();
                                     menu.separator().item(
-                                        PopupMenuItem::new(t("Safe auto — edits allowed; commands run without asking only when harmless (read, build, test)"))
+                                        PopupMenuItem::new(t("Safe auto - edits allowed; commands run without asking only when harmless (read, build, test)"))
                                             .checked(current == AUTO_SAFE)
                                             .on_click(move |_, _, cx| {
                                                 let _ = view.update(cx, |t, cx| t.set_mode(AUTO_SAFE.to_string(), cx));
@@ -1560,7 +1560,7 @@ impl Render for HermesPanel {
                             // The model name can be long: it shrinks, the buttons stay.
                             .child(
                                 div().flex_1().min_w_0().overflow_hidden().child(
-                                    Button::new("hermes-model").ghost().xsmall().icon(IconName::Bot).label(if model_label.is_empty() { "—".to_string() } else { model_label }).disabled(!ready)
+                                    Button::new("hermes-model").ghost().xsmall().icon(IconName::Bot).label(if model_label.is_empty() { "-".to_string() } else { model_label }).disabled(!ready)
                                         .dropdown_menu(move |mut menu, _, _| {
                                             for (id, name) in models.0.clone() {
                                                 let view = view.clone();
@@ -1574,7 +1574,7 @@ impl Render for HermesPanel {
                                 ),
                             )
                             .when(self.running, |el| {
-                                el.child(Button::new("hermes-send-now").xsmall().flex_none().ghost().icon(IconName::Zap).disabled(!ready).tooltip(t("Send now (interrupts Hermes) · ⌘↵"))
+                                el.child(Button::new("hermes-send-now").xsmall().flex_none().ghost().icon(IconName::Zap).disabled(!ready).tooltip(t("Send now (interrupts Hermes) | ⌘↵"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         if this.editing.is_some() {
                                             return this.finish_edit(true, true, window, cx);

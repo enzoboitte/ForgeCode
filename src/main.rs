@@ -1,4 +1,4 @@
-//! ForgeCode — a GPUI code editor for C/C++, Rust, JS/TS and the web,
+//! ForgeCode - a GPUI code editor for C/C++, Rust, JS/TS and the web,
 //! with language servers, GitHub Copilot, a local-model agent, a terminal, a debugger and modules.
 
 // A window app on Windows: no console window behind it in release builds.
@@ -58,6 +58,17 @@ pub fn load_modules(cx: &mut App) {
     settings::apply_theme(cx);
 }
 
+/// The folder to open when nothing else says: where `forgecode` was typed in a terminal, but not
+/// the app's own folder (a double click on the .exe / binary starts there) nor `/` (macOS apps).
+fn launch_dir() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?.canonicalize().ok()?;
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).and_then(|e| e.parent().map(PathBuf::from));
+    if Some(&cwd) == exe_dir.as_ref() || cwd.parent().is_none() {
+        return dirs::home_dir();
+    }
+    Some(cwd)
+}
+
 fn main() {
     // `forgecode --mcp-web`: the web tools server the agent starts (no window).
     if std::env::args().nth(1).as_deref() == Some(ai::web_mcp::FLAG) {
@@ -70,7 +81,7 @@ fn main() {
         .nth(1)
         .map(PathBuf::from)
         .or_else(|| recent::list().into_iter().next())
-        .or_else(|| std::env::current_dir().ok())
+        .or_else(launch_dir)
         .and_then(|p| p.canonicalize().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let (root, file) = match arg.is_file() {

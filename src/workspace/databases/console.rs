@@ -39,7 +39,7 @@ impl ConsoleTab {
 
     pub fn title(&self, cx: &App) -> String {
         let conn = self.hub.read(cx).conn(&self.conn).map(|c| c.name.clone()).unwrap_or_default();
-        format!("SQL · {conn}")
+        format!("SQL | {conn}")
     }
 
     /// The selection, else the whole text.
@@ -86,11 +86,11 @@ impl ConsoleTab {
                         }
                         Ok(v) if v.get("columns").is_some() => {
                             let rows = Rows::from(&v);
-                            this.message = Some(format!("{} {}{} · {ms} ms", rows.rows.len(), t("rows"), if rows.truncated { " (+)" } else { "" }));
+                            this.message = Some(format!("{} {}{} | {ms} ms", rows.rows.len(), t("rows"), if rows.truncated { " (+)" } else { "" }));
                             this.result = Some(rows);
                         }
                         Ok(v) => {
-                            this.message = Some(format!("{} {} · {ms} ms", v["rowcount"].as_i64().unwrap_or(0), t("rows affected")));
+                            this.message = Some(format!("{} {} | {ms} ms", v["rowcount"].as_i64().unwrap_or(0), t("rows affected")));
                             this.result = None;
                         }
                         Err(e) => this.error = Some(e.to_string()),

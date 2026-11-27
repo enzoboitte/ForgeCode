@@ -688,7 +688,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("forgecode-changes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        assert!(crate::util::command("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
         for i in 0..3000 {
             std::fs::write(dir.join(format!("f{i}.txt")), "x").unwrap();
         }

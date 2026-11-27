@@ -2,7 +2,7 @@
 //! Shared by the LSP client and the DAP (debugger) client.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 
 use anyhow::{Context as _, Result, anyhow};
 use serde_json::Value;
@@ -50,7 +50,7 @@ pub fn spawn_with_exit(
     on_exit: impl FnOnce(String) + Send + 'static,
 ) -> Result<(Child, ChildStdin)> {
     let (program, args) = argv.split_first().ok_or_else(|| anyhow!("empty command"))?;
-    let mut child = Command::new(program)
+    let mut child = crate::util::command(program)
         .args(args)
         .current_dir(cwd)
         // npm-installed servers start with `#!/usr/bin/env node`: they need ForgeCode's own Node.

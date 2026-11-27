@@ -12,7 +12,7 @@ pub const FLAG: &str = "--mcp-web";
 
 /// Standing instruction given to the agent (written in its persona file).
 pub const GUIDANCE: &str = "You have Internet access: the `web_search` and `web_fetch` tools of the `forgecode-web` server (and any other web tool you have). \
-Whenever you need information you do not know for certain — a library's or API's documentation, a version, an error message, how a tool is installed or configured, anything recent — you MUST search the web and read the relevant page BEFORE answering or writing code. \
+Whenever you need information you do not know for certain - a library's or API's documentation, a version, an error message, how a tool is installed or configured, anything recent - you MUST search the web and read the relevant page BEFORE answering or writing code. \
 Never guess, never invent an API, an option or a URL. When the search finds nothing, say so. Give the URLs you relied on. \
 After changing a web page or app, look at it: `browser_screenshot` shows you the page as rendered (with its console messages), `browser_dom` gives the HTML after its scripts ran. Check the layout and the console before saying it works.";
 
@@ -138,7 +138,7 @@ fn browser(url: &str, extra: &[String]) -> Result<(String, String), String> {
     }
     let exe = chrome().ok_or("no Chrome, Edge, Brave or Chromium found on this computer")?;
     let profile = std::env::temp_dir().join(format!("forgecode-browser-{}", std::process::id()));
-    let mut child = std::process::Command::new(exe)
+    let mut child = crate::util::command(exe)
         .args(["--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--virtual-time-budget=8000", "--enable-logging=stderr", "--v=0"])
         .arg(format!("--user-data-dir={}", profile.display()))
         .args(extra)

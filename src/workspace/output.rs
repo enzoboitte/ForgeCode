@@ -68,10 +68,10 @@ impl OutputPanel {
             #[cfg(unix)]
             {
                 let group = format!("-{}", child.id());
-                let _ = std::process::Command::new("kill").args(["-TERM", "--", &group]).status();
+                let _ = crate::util::command("kill").args(["-TERM", "--", &group]).status();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(2));
-                    let _ = std::process::Command::new("kill").args(["-KILL", "--", &group]).status();
+                    let _ = crate::util::command("kill").args(["-KILL", "--", &group]).status();
                 });
             }
             let _ = child.kill();
@@ -264,7 +264,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_string();
-        let alive = |pid: &str| std::process::Command::new("kill").args(["-0", pid]).status().unwrap().success();
+        let alive = |pid: &str| crate::util::command("kill").args(["-0", pid]).status().unwrap().success();
         assert!(alive(&pid));
         assert!(output.read_with(cx, |o, _| o.is_running()));
         output.update(cx, |o, cx| o.stop(cx));

@@ -3,7 +3,6 @@
 //! work and answers in JSON.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Result, anyhow};
 use gpui_kit::assets::IconName;
@@ -54,7 +53,7 @@ pub fn script(cx: &App) -> Option<(PathBuf, PathBuf)> {
 
 /// Run the script in the project; its standard output, or its error.
 fn call(python: &Path, script: &Path, root: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(python).arg(script).args(args).current_dir(root).env("FORGE_WORKSPACE", root).output()?;
+    let out = crate::util::command(python).arg(script).args(args).current_dir(root).env("FORGE_WORKSPACE", root).output()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(anyhow!("{}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("conan failed").trim_start_matches("Erreur : ")));
@@ -222,6 +221,7 @@ impl Render for ConanPanel {
                 h_flex()
                     .id(SharedString::from(format!("req-{r}")))
                     .group("req")
+                    .w_full()
                     .h(px(24.))
                     .px_3()
                     .gap_1()
@@ -270,6 +270,8 @@ impl Render for ConanPanel {
                                 let (view, reference, page) = (view.clone(), format!("{}/{}", p.name, p.version), format!("https://conan.io/center/recipes/{}", p.name));
                                 h_flex()
                                     .id(SharedString::from(format!("pkg-{}", p.name)))
+                                    .debug_selector(move || format!("pkg-row-{i}"))
+                                    .w_full()
                                     .h(px(26.))
                                     .px_3()
                                     .gap_1()
@@ -302,6 +304,33 @@ impl Render for ConanPanel {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::{AppContext as _, TestAppContext};
+
+    /// Every package row spans the panel: its buttons line up whatever the name's length.
+    #[gpui_kit::test]
+    fn package_rows_line_up(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let base = crate::settings::Settings::default();
+            cx.set_global(base.clone());
+            cx.set_global(crate::settings::Layers { base, ..Default::default() });
+            cx.set_global(crate::plugins::Plugins::default());
+        });
+        let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let s = slot.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|cx| super::ConanPanel::new(std::env::temp_dir(), window, cx));
+            *s.borrow_mut() = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = slot.borrow().clone().unwrap();
+        let pkg = |name: &str| super::Package { name: name.into(), version: "1.0".into(), remote: "conancenter".into() };
+        cx.update(|_, cx| view.update(cx, |v, cx| { v.catalog = vec![pkg("aaf"), pkg("accellera-uvm-systemc")]; cx.notify(); }));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let (a, b) = (cx.debug_bounds("pkg-row-0").unwrap(), cx.debug_bounds("pkg-row-1").unwrap());
+        assert_eq!((a.left(), a.right()), (b.left(), b.right()), "short {a:?} long {b:?}");
+    }
+
     #[test]
     fn reads_the_scripts_answers() {
         let out = "Conan n'est pas installé…\n[{\"name\": \"fmt\", \"version\": \"10.2.1\", \"remote\": \"conancenter\"}]\n";

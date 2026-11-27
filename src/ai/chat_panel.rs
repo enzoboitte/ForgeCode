@@ -400,13 +400,13 @@ fn model_label(model_ref: &str, cx: &App) -> String {
     // Long local model ids (`qwen3.6-35b-a3b-…-preserved`) must not push the composer out.
     let model = model.rsplit('/').next().unwrap_or(model);
     let model: String = if model.chars().count() > 26 { model.chars().take(25).chain(['…']).collect() } else { model.to_string() };
-    format!("{model} · {provider}")
+    format!("{model} | {provider}")
 }
 
 impl ChatPanel {
     pub fn new(workspace: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(1, 10).submit_on_enter(true).placeholder(format!("{}…  / commandes · @ fichiers", t("Ask anything")))
+            TextareaState::new(window, cx).auto_grow(1, 10).submit_on_enter(true).placeholder(format!("{}…  / commandes | @ fichiers", t("Ask anything")))
         });
         let _sub = cx.subscribe_in(&composer, window, |this, input, event: &InputEvent, window, cx| {
             if let InputEvent::Change = event {
@@ -1234,7 +1234,7 @@ impl ChatPanel {
                                 // The security reviewer's verdict, on the action it judged.
                                 el.child(div().id(("review", ix)).text_color(if ok { theme.muted_foreground } else { theme.warning })
                                     .child(IconName::ShieldCheck)
-                                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(format!("{} — {reason}", t(if ok { "Approved" } else { "Refused" }))).build(w, cx)))
+                                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(format!("{} - {reason}", t(if ok { "Approved" } else { "Refused" }))).build(w, cx)))
                             })
                             .child(div().text_color(color).child(status)),
                     )
@@ -1281,7 +1281,7 @@ impl ChatPanel {
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::OpenAgents)))
                 .child(div().text_color(theme.primary).child(IconName::Network))
                 .child(div().font_weight(FontWeight::MEDIUM).child(role.clone()))
-                .child(div().text_color(theme.muted_foreground).child(model_label(&format!("x/{model}"), cx).split(" · ").next().unwrap_or("").to_string()))
+                .child(div().text_color(theme.muted_foreground).child(model_label(&format!("x/{model}"), cx).split(" | ").next().unwrap_or("").to_string()))
                 .child(div().flex_1().truncate().text_color(theme.muted_foreground).child(task.clone()))
                 .child(status_icon(*status, px(14.), cx))
                 .into_any_element(),
@@ -1291,7 +1291,7 @@ impl ChatPanel {
                 .text_xs()
                 .text_color(if *allowed { theme.muted_foreground } else { theme.warning })
                 .child(IconName::ShieldCheck)
-                .child(format!("{} · {name}", t(if *allowed { "Approved" } else { "Refused" })))
+                .child(format!("{} | {name}", t(if *allowed { "Approved" } else { "Refused" })))
                 .when(!*allowed, |el| el.child(div().flex_1().truncate().child(reason.clone())))
                 .into_any_element(),
         }
@@ -1334,7 +1334,7 @@ impl ChatPanel {
                 for (id, name, models) in groups {
                     menu = menu.label(name);
                     if models.is_empty() {
-                        menu = menu.item(PopupMenuItem::new(t("No models — refresh")).disabled(true));
+                        menu = menu.item(PopupMenuItem::new(t("No models - refresh")).disabled(true));
                     }
                     for m in models {
                         let model_ref = format!("{id}/{m}");
