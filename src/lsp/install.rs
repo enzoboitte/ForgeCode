@@ -116,7 +116,11 @@ pub fn resolve(argv: &[String]) -> Result<Vec<String>> {
     if needs_node(&path) {
         ensure_node()?;
     }
-    Ok(std::iter::once(path.display().to_string()).chain(argv[1..].iter().cloned()).collect())
+    let mut argv: Vec<String> = std::iter::once(path.display().to_string()).chain(argv[1..].iter().cloned()).collect();
+    if program == "clangd" {
+        argv.extend(crate::language::clangd_query_driver());
+    }
+    Ok(argv)
 }
 
 fn run(cmd: &mut Command) -> Result<String> {

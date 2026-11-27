@@ -182,6 +182,28 @@ pub fn c_include_dirs(root: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// `-I` flags for [`c_include_dirs`], quoted for a shell command line.
+/// clangd learns a compiler's own headers and target (MinGW's libstdc++, a cross gcc) by running
+/// it; allowed for the installed compilers' folders only, not any path a project's
+/// compile_commands.json names.
+pub fn clangd_query_driver() -> Option<String> {
+    let mut dirs: Vec<String> = vec![];
+    let named = ["CC", "CXX"].iter().filter_map(|v| std::env::var(v).ok()).filter(|v| !v.is_empty());
+    for compiler in ["gcc", "g++", "clang", "clang++", "cc", "c++"].iter().map(|c| c.to_string()).chain(named) {
+        let Some(dir) = crate::lsp::install::which(&compiler).as_deref().and_then(Path::parent).map(|d| d.display().to_string().replace('\\', "/")) else { continue };
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    (!dirs.is_empty()).then(|| format!("--query-driver={}", dirs.iter().map(|d| format!("{d}/*")).collect::<Vec<_>>().join(",")))
+}
+
+/// Files no compile_commands.json describes: on Windows with MinGW and no MSVC, clangd's default
+/// target (MSVC) finds no standard headers; MinGW's target finds gcc's on the PATH.
+fn fallback_target() -> Option<String> {
+    let has = |p: &str| crate::lsp::install::which(p).is_some();
+    (cfg!(windows) && !has("cl") && (has("g++") || has("gcc"))).then(|| "--target=x86_64-w64-mingw32".to_string())
+}
+
 pub fn include_flags(root: &Path) -> String {
     c_include_dirs(root).iter().map(|d| format!("-I\"{}\"", d.display())).collect::<Vec<_>>().join(" ")
 }
@@ -192,7 +214,7 @@ pub fn include_flags(root: &Path) -> String {
 pub fn server_settings(settings: &crate::settings::Settings, root: &Path) -> serde_json::Value {
     let level = |lang: &str| settings.lang(lang).type_checking;
     let python = project_python(&settings.lang("python"), root).map(|p| p.display().to_string()).unwrap_or_default();
-    let fallback: Vec<String> = c_include_dirs(root).iter().map(|d| format!("-I{}", d.display())).collect();
+    let fallback: Vec<String> = c_include_dirs(root).iter().map(|d| format!("-I{}", d.display())).chain(fallback_target()).collect();
     let php = level("php");
     let php_types = !matches!(php.as_str(), "off" | "basic");
     let (js, ts) = (level("javascript"), level("typescript"));
@@ -398,6 +420,16 @@ const GLSL_HIGHLIGHTS: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// clangd may run the installed compilers (for their own headers), and only those.
+    #[test]
+    fn clangd_queries_installed_compilers_only() {
+        let Some(flag) = clangd_query_driver() else { return eprintln!("no compiler installed") };
+        let globs: Vec<&str> = flag.strip_prefix("--query-driver=").unwrap().split(',').collect();
+        assert!(globs.iter().all(|g| g.ends_with("/*") && !g.contains('\\')), "{flag}");
+        let gcc = crate::lsp::install::which("gcc").or_else(|| crate::lsp::install::which("clang")).unwrap();
+        assert!(globs.contains(&format!("{}/*", gcc.parent().unwrap().display()).as_str()), "{flag}");
+    }
 
     /// (capture, text) pairs the registered query finds in `src`.
     fn captures(name: &str, src: &str) -> std::collections::BTreeSet<(String, String)> {
