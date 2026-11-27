@@ -51,3 +51,8 @@ codegen-units = 4
 gpui-component = { path = "vendor/gpui-component" }
 # Patched copy (vendor/gpui-base): inline suggestions that grow while they are generated.
 gpui-base = { path = "vendor/gpui-base" }
+
+# Browser tab: the system's web engine (WebView2 on Windows, WebKit on macOS). Linux opens the
+# system browser instead (wry would need GTK and WebKitGTK there).
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+wry = "0.58"

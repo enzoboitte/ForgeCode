@@ -182,6 +182,7 @@ impl Workspace {
             Tab::Diff { .. } => (IconName::GitCompare, muted, false),
             Tab::Graph(_) => (IconName::GitGraph, muted, false),
             Tab::Agents(_) => (IconName::Network, muted, false),
+            Tab::Browser(_) => (IconName::Globe, muted, false),
             Tab::Image { path, .. } => {
                 let (icon, tint) = crate::icons::file_icon(path);
                 (icon, tint, false)
@@ -623,6 +624,7 @@ impl Workspace {
             Tab::Video(view) => view.clone().into_any_element(),
             Tab::Table(view) => view.clone().into_any_element(),
             Tab::Console(view) => view.clone().into_any_element(),
+            Tab::Browser(view) => view.clone().into_any_element(),
             Tab::Settings => super::settings_page::settings_view(cx).into_any_element(),
         }
     }
@@ -1005,6 +1007,14 @@ impl Render for Workspace {
         if window.focused(cx).is_none() {
             self.focus.focus(window, cx);
         }
+        // A page in a tab its pane does not show must hide: it is a native view above the window.
+        for pane in &self.panes {
+            for (ix, tab) in pane.tabs.iter().enumerate() {
+                if let Tab::Browser(view) = tab {
+                    view.update(cx, |b, _| b.set_shown(pane.active == Some(ix)));
+                }
+            }
+        }
         let layout = self.layout.clone();
         let center = self.render_layout(&layout, String::new(), window, cx);
         let bottom = self.render_bottom(cx).into_any_element();
@@ -1064,6 +1074,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|t, _: &StepIn, _, cx| t.debug.update(cx, |d, cx| d.step_in(cx))))
             .on_action(cx.listener(|t, _: &StepOut, _, cx| t.debug.update(cx, |d, cx| d.step_out(cx))))
             .on_action(cx.listener(|t, _: &ToggleSettings, w, cx| t.open_settings(w, cx)))
+            .on_action(cx.listener(|t, _: &OpenBrowser, w, cx| t.open_browser("about:blank", w, cx)))
             .on_action(cx.listener(|t, _: &ShowExplorer, _, cx| t.toggle_sidebar(Sidebar::Explorer, cx)))
             .on_action(cx.listener(|t, _: &ShowGit, _, cx| t.toggle_sidebar(Sidebar::Git, cx)))
             .on_action(cx.listener(|t, _: &ShowGitGraph, window, cx| {

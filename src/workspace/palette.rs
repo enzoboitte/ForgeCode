@@ -31,6 +31,7 @@ fn actions() -> Vec<(&'static str, &'static str, IconName, Box<dyn Action>)> {
         ("Explorer", "⇧⌘E", IconName::Files, Box::new(ShowExplorer)),
         ("Source Control", "⌃⇧G", IconName::GitBranch, Box::new(ShowGit)),
         ("History graph", "", IconName::GitGraph, Box::new(ShowGitGraph)),
+        ("Web browser", "", IconName::Globe, Box::new(OpenBrowser)),
         ("Problems", "⇧⌘M", IconName::CircleAlert, Box::new(ShowProblems)),
         ("Terminal", "⌃`", IconName::SquareTerminal, Box::new(ToggleTerminal)),
         ("New terminal", "⌃⇧`", IconName::SquareTerminal, Box::new(NewTerminal)),

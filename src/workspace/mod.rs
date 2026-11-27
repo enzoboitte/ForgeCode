@@ -28,6 +28,7 @@ mod marketplace;
 mod modules;
 mod sql;
 mod video;
+mod browser;
 mod viewer;
 
 use std::collections::{BTreeMap, HashMap};
@@ -66,7 +67,7 @@ actions!(
     [
         Save, OpenFolder, CloseTab, ToggleSettings, ToggleLeft, ToggleBottom, ToggleRight, ToggleTerminal, NewTerminal,
         ShowExplorer, ShowGit, ShowGitGraph, ShowProblems, RunFile, StartDebug, StopDebug, StepOver, StepIn, StepOut, ToggleBreakpoint,
-        FocusChat, AddSelectionToChat, QuickOpenFile, CommandPalette, ShowSearch, FormatDocument, OpenProjectInstructions, OpenProjectSettings, ToggleTheme, NewModule, ReloadModules, NewProject, SplitRight, AcceptSuggestionWord, Quit,
+        FocusChat, AddSelectionToChat, QuickOpenFile, CommandPalette, ShowSearch, FormatDocument, OpenProjectInstructions, OpenProjectSettings, ToggleTheme, NewModule, ReloadModules, NewProject, SplitRight, AcceptSuggestionWord, Quit, OpenBrowser,
         ToggleLineComment, MoveLineUp, MoveLineDown, CopyLineUp, CopyLineDown, DeleteLine, InsertLineBelow, InsertLineAbove, SelectNextOccurrence, SelectAllOccurrences
     ]
 );
@@ -168,6 +169,7 @@ enum Tab {
     Table(Entity<databases::table::TableTab>),
     /// A SQL console of one connection.
     Console(Entity<databases::console::ConsoleTab>),
+    Browser(Entity<browser::BrowserView>),
     Settings,
 }
 
@@ -183,6 +185,7 @@ impl Tab {
             Tab::Video(v) => v.read(cx).path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             Tab::Table(v) => v.read(cx).title(cx),
             Tab::Console(v) => v.read(cx).title(cx),
+            Tab::Browser(v) => v.read(cx).title.chars().take(30).collect(),
             Tab::Settings => t("Settings").into(),
         }
     }
@@ -671,6 +674,13 @@ impl Workspace {
         pane.tabs.push(tab);
         let ix = pane.tabs.len() - 1;
         self.activate(focused, ix, window, cx);
+    }
+
+    /// A new browser tab, on the given page or a blank one.
+    fn open_browser(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| browser::BrowserView::new(url, window, cx));
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        self.open_tab(Tab::Browser(view), window, cx);
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {

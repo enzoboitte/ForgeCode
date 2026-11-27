@@ -63,6 +63,7 @@ pub fn app_menus(plugins: &Plugins) -> Vec<Menu> {
             item("Search", ShowSearch),
             item("Source Control", ShowGit),
             item("History graph", ShowGitGraph),
+            item("Web browser", OpenBrowser),
             item("Problems", ShowProblems),
             MenuItem::separator(),
             item("Toggle sidebar", ToggleLeft),
